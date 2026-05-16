@@ -51,9 +51,13 @@ export default function AIGenerateEndpoint({ isOpen, onClose, onGenerated, defau
   };
 
   const copyToClipboard = () => {
-    if (result?.generated_code) {
-      navigator.clipboard.writeText(result.generated_code);
-      alert('Code copied to clipboard!');
+    const textToCopy = result?.generated_functions?.length
+      ? JSON.stringify(result.generated_functions, null, 2)
+      : result?.generated_code;
+
+    if (textToCopy) {
+      navigator.clipboard.writeText(textToCopy);
+      alert(result?.generated_functions?.length ? 'JSON copied to clipboard!' : 'Code copied to clipboard!');
     }
   };
 
@@ -218,6 +222,15 @@ export default function AIGenerateEndpoint({ isOpen, onClose, onGenerated, defau
                       <div className="mb-2 text-xs font-medium text-slate-400">Generated Code:</div>
                       <pre className="overflow-x-auto rounded-lg bg-[#161616] p-4 text-xs text-slate-100">
                         <code>{result.generated_code}</code>
+                      </pre>
+                    </div>
+                  )}
+
+                  {result.generated_functions?.length > 0 && (
+                    <div className="mb-4">
+                      <div className="mb-2 text-xs font-medium text-slate-400">Structured Functions (JSON):</div>
+                      <pre className="overflow-x-auto rounded-lg bg-[#161616] p-4 text-xs text-slate-100">
+                        <code>{JSON.stringify(result.generated_functions, null, 2)}</code>
                       </pre>
                     </div>
                   )}

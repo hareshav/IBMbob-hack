@@ -48,15 +48,59 @@ def create_user(payload: dict):
 def delete_user(user_id: int):
     target = find_user_or_404(user_id)
     return archive_user(target)
+@app.get("/api/v1/lcm")
+def lcm(a: int, b: int) -> int:
+    return abs(a*b) // math.gcd(a, b) 
 
-def validate_field(cls, v):
-        # Add validation logic
-        return v
+def lcm(a: int, b: int) -> int:
+    return abs(a*b) // math.gcd(a, b)
 
-def lcm(x, y):
-    return abs(x*y) // math.gcd(x, y)
+def lcm(a: int, b: int) -> int:
+    return abs(a*b) // math.gcd(a, b)
 
-def gcd(x, y):
-    while(y):
-        x, y = y, x % y
-    return x
+def lcm(a: int, b: int) -> int:
+    return abs(a*b) // math.gcd(a, b)
+
+
+def merge(left: List[int], right: List[int]) -> List[int]:
+    result = []
+    i, j = 0, 0
+    while i < len(left) and j < len(right):
+        if left[i] < right[j]:
+            result.append(left[i])
+            i += 1
+        else:
+            result.append(right[j])
+            j += 1
+    result += left[i:]
+    result += right[j:]
+    return result
+
+def merge(left: List[int], right: List[int]) -> List[int]:
+    result = []
+    i, j = 0, 0
+    while i < len(left) and j < len(right):
+        if left[i] < right[j]:
+            result.append(left[i])
+            i += 1
+        else:
+            result.append(right[j])
+            j += 1
+    result += left[i:]
+    result += right[j:]
+    return result
+
+def merge_sort(arr: List[int]) -> List[int]:
+    if len(arr) <= 1:
+        return arr
+    mid = len(arr) // 2
+    left = arr[:mid]
+    right = arr[mid:]
+    left = merge_sort(left)
+    right = merge_sort(right)
+    return merge(left, right)
+
+
+@app.get("/api/v1/merge sort")
+async def merge_sort_handler(arr: List[int]) -> List[int]:
+    return merge_sort(arr)

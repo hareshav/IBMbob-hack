@@ -71,5 +71,5 @@ def find_user_or_404(user_id):
 
 
 def archive_user(user):
-    user["active"] = False
+    user["active"] = False 
     return {"deleted": user["id"], "active": user["active"]}

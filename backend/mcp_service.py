@@ -170,7 +170,7 @@ async def generate_endpoint(payload: EndpointPayload) -> Dict[str, Any]:
     change_request = (
         f"Create a new {payload.method.upper()} endpoint at {payload.path}. "
         f"Business description: {payload.description}. "
-        "The output must be a structured JSON plan containing function artifacts with func_name, func_path, func_args, path_operation_decorator, decorators, and func_code. "
+        "The output must be a structured JSON plan containing function artifacts with func_name, func_path, func_args, path_operation_decorator, decorators, source_file, and func_code. "
         "Write code that can be appended directly to the target file."
     )
 
@@ -182,8 +182,19 @@ async def generate_endpoint(payload: EndpointPayload) -> Dict[str, Any]:
             route_path=payload.path,
         )
 
-        updated_source = artifact["source_after"]
-        target_path.write_text(updated_source, encoding="utf-8")
+        file_changes = artifact.get("file_changes") or [
+            {
+                "file_path": artifact["file_path"],
+                "source_after": artifact["source_after"],
+            }
+        ]
+
+        changed_paths: List[Path] = []
+        for file_change in file_changes:
+            file_path = Path(file_change["file_path"]).resolve()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(file_change["source_after"], encoding="utf-8")
+            changed_paths.append(file_path)
 
         bridge_main.CURRENT_WORKSPACE_PATH = str(workspace_root)
         bridge_main.CURRENT_MAIN_FILE_PATH = str(target_path)
@@ -193,7 +204,7 @@ async def generate_endpoint(payload: EndpointPayload) -> Dict[str, Any]:
         )
         bridge_main.CURRENT_GRAPH_FILES = graph_payload.get("source_files", [])
 
-        syntax_errors = bridge_main._collect_syntax_errors([target_path], workspace_root)
+        syntax_errors = bridge_main._collect_syntax_errors(changed_paths, workspace_root)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

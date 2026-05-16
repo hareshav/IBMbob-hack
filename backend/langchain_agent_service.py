@@ -43,6 +43,7 @@ class GeneratedFunctionSpec(BaseModel):
     func_args: List[FunctionArgumentSpec] = Field(default_factory=list, description="Function arguments.")
     path_operation_decorator: Optional[str] = Field(default=None, description="Primary FastAPI path operation decorator for endpoint handlers.")
     decorators: List[str] = Field(default_factory=list, description="Function decorators, including FastAPI path operation decorators.")
+    source_file: Optional[str] = Field(default=None, description="Relative or absolute file path where this function should be written.")
     func_code: str = Field(..., description="Complete top-level Python function code.")
     purpose: Optional[str] = Field(default=None, description="Short summary of the function's role.")
 
@@ -128,6 +129,23 @@ def _source_function_names(source: str) -> List[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names.append(node.name)
     return names
+def _default_service_target_path(target_path: Path) -> Path:
+    return target_path.parent / "services" / "generated_service.py"
+
+def _module_import_path(workspace_root: Path, file_path: Path) -> str:
+    relative_path = file_path.resolve().relative_to(workspace_root.resolve())
+    module_parts = list(relative_path.with_suffix("").parts)
+    return ".".join(module_parts)
+
+def _append_code_block(source_code: str, generated_code: str) -> str:
+    cleaned_code = _ensure_trailing_newline(_strip_code_fences(generated_code))
+    if not cleaned_code.strip():
+        raise RuntimeError("Generated code is empty.")
+
+    candidate = source_code.rstrip() + "\n\n" + cleaned_code if source_code.strip() else cleaned_code
+    ast.parse(candidate)
+    return candidate
+    return names
 
 
 def _load_watsonx_credentials(
@@ -211,8 +229,8 @@ class AutonomousWorkspaceAgent:
             "2. The endpoint handler must include the correct FastAPI decorator for the requested method and path.\n"
             "3. The endpoint handler JSON must include the decorator text in a decorators array, for example [\"@app.get(\\\"/path\\\")\"].\n"
             "4. The endpoint handler JSON must also include path_operation_decorator with the primary decorator string.\n"
-            "5. If the endpoint needs supporting logic, add helper functions after the handler in the same response.\n"
-            "6. Each function must include func_name, func_path, func_args, path_operation_decorator, decorators, and func_code.\n"
+            "5. If the endpoint needs supporting logic, put those helper functions in a services module and set their source_file to that services file.\n"
+            "6. Each function must include func_name, func_path, func_args, path_operation_decorator, decorators, source_file, and func_code.\n"
             "7. func_code must be valid Python source and must not be wrapped in markdown fences.\n"
             "8. Reuse existing imports and helpers from the file when possible.\n"
             "9. Do not invent unrelated changes, and do not return plain utility functions unless they are helpers for the endpoint.\n"
@@ -265,9 +283,8 @@ class AutonomousWorkspaceAgent:
         route_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         target_path = Path(target_file).resolve()
-        source_code = target_path.read_text(encoding="utf-8")
         plan = self._generate_plan(
-            source_code=source_code,
+            source_code=target_path.read_text(encoding="utf-8"),
             change_request=change_request,
             target_file=str(target_path),
             route_method=route_method,
@@ -286,22 +303,69 @@ class AutonomousWorkspaceAgent:
                 plan.functions[0].decorators = decorator_lines
             elif decorator_lines and decorator_lines[0] not in plan.functions[0].decorators:
                 plan.functions[0].decorators = [*plan.functions[0].decorators, *decorator_lines]
-        generated_code = "\n\n".join(block.strip() for block in generated_blocks if block.strip())
-        if not generated_code.strip():
-            raise RuntimeError("The model returned empty function code.")
+        service_target_path = _default_service_target_path(target_path)
+        helper_functions = plan.functions[1:]
+        helper_names = [function.func_name for function in helper_functions if function.func_name]
 
-        updated_source = self._apply_generated_code(source_code, generated_code)
+        file_blocks: Dict[str, List[str]] = {}
+        for index, function in enumerate(plan.functions):
+            if index == 0:
+                function.source_file = str(target_path)
+            elif helper_functions:
+                function.source_file = str(service_target_path)
+            else:
+                function.source_file = str(target_path)
+
+            generated_block = _strip_code_fences(function.func_code)
+            if index == 0:
+                generated_block = _inject_decorator(generated_block, decorator_lines)
+                function.path_operation_decorator = decorator_lines[0] if decorator_lines else None
+                if function.decorators == []:
+                    function.decorators = decorator_lines
+                elif decorator_lines and decorator_lines[0] not in function.decorators:
+                    function.decorators = [*function.decorators, *decorator_lines]
+
+                if helper_names:
+                    import_line = f"from services.generated_service import {', '.join(helper_names)}"
+                    if import_line not in generated_block:
+                        generated_block = f"{import_line}\n{generated_block}"
+
+            file_blocks.setdefault(function.source_file or str(target_path), []).append(generated_block)
+
+        file_changes: List[Dict[str, Any]] = []
+        primary_change: Optional[Dict[str, Any]] = None
+        for file_name, blocks in file_blocks.items():
+            file_path = Path(file_name)
+            existing_source = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            combined_code = "\n\n".join(block.strip() for block in blocks if block.strip())
+            if not combined_code.strip():
+                continue
+            updated_source = _append_code_block(existing_source, combined_code)
+            file_change = {
+                "file_path": str(file_path),
+                "relative_path": str(file_path.relative_to(self.workspace_root)).replace("\\", "/"),
+                "source_before": existing_source,
+                "source_after": updated_source,
+                "generated_code": _ensure_trailing_newline(combined_code),
+            }
+            file_changes.append(file_change)
+            if file_path.resolve() == target_path.resolve():
+                primary_change = file_change
+
+        if primary_change is None:
+            raise RuntimeError("The model returned no primary endpoint code.")
 
         return {
             "explanation": plan.explanation,
             "warnings": plan.warnings,
             "suggestions": plan.suggestions,
             "functions": [function.model_dump() for function in plan.functions],
-            "generated_code": _ensure_trailing_newline(generated_code),
-            "source_before": source_code,
-            "source_after": updated_source,
-            "file_path": str(target_path),
-            "relative_path": str(target_path.relative_to(self.workspace_root)).replace("\\", "/"),
+            "generated_code": primary_change["generated_code"],
+            "source_before": primary_change["source_before"],
+            "source_after": primary_change["source_after"],
+            "file_path": primary_change["file_path"],
+            "relative_path": primary_change["relative_path"],
+            "file_changes": file_changes,
         }
 
     def apply_generated_code(
@@ -338,11 +402,42 @@ class AutonomousWorkspaceAgent:
         if not cleaned_code.strip():
             raise RuntimeError("The model returned empty refactored code.")
 
-        ast.parse(cleaned_code)
+        # Parse and extract only the top-level function definition the model returned.
+        try:
+            tree = ast.parse(cleaned_code)
+        except SyntaxError:
+            # If the returned code isn't valid Python, return it as-is so callers can inspect it.
+            return {
+                "explanation": plan.explanation,
+                "generated_code": cleaned_code,
+                "warnings": plan.warnings,
+                "suggestions": plan.suggestions,
+            }
+
+        func_node = None
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                func_node = node
+                break
+
+        if func_node is None:
+            # No function found; return cleaned_code as a fallback.
+            result_code = cleaned_code
+        else:
+            lines = cleaned_code.splitlines(keepends=True)
+            start = max(getattr(func_node, "lineno", 1) - 1, 0)
+            end = max(getattr(func_node, "end_lineno", start + 1), start + 1)
+            result_code = "".join(lines[start:end])
+
+        # Remove any leftover code fence markers or stray triple quotes at end.
+        result_code = result_code.rstrip()
+        if result_code.endswith("'''") or result_code.endswith('\"\"\"'):
+            result_code = result_code[:-3].rstrip()
+        result_code = _ensure_trailing_newline(result_code)
 
         return {
             "explanation": plan.explanation,
-            "generated_code": cleaned_code,
+            "generated_code": result_code,
             "warnings": plan.warnings,
             "suggestions": plan.suggestions,
         }
@@ -375,7 +470,10 @@ class AutonomousWorkspaceAgent:
             target_file=target_path,
             change_request=change_request,
         )
-        target_path.write_text(artifact["source_after"], encoding="utf-8")
+        for file_change in artifact.get("file_changes", []):
+            file_path = Path(file_change["file_path"])
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(file_change["source_after"], encoding="utf-8")
         artifact["file_path"] = str(target_path)
         artifact["relative_path"] = str(target_path.relative_to(self.workspace_root)).replace("\\", "/")
         artifact["source_before"] = source_code

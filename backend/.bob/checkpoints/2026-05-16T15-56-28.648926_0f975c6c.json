@@ -1,0 +1,14 @@
+{
+  "id": "2026-05-16T15-56-28.648926_0f975c6c",
+  "timestamp": "2026-05-16T15:56:28.648926",
+  "file_path": "D:\\projects\\IBM\\testing\\sample_api.py",
+  "operation": "generate_endpoint_GET_/api/v1/",
+  "content": "from fastapi import FastAPI\nfrom typing import List\nfrom services.user_service import (\n    archive_user,\n    build_users_response,\n    fetch_active_users,\n    find_user_or_404,\n    persist_user,\n)\nfrom services.validators import validate_create_payload\n\napp = FastAPI(title=\"Testing API\")\n\n\n@app.get(\"/api/v1/users\")\n\n\n\n\ndef list_users() -> List[dict]:\n    \"\"\"\n    Fetches active users from a database and builds a response containing their details.\n\n    Args:\n        None\n\n    Returns:\n        A list of dictionaries representing user details. Each dictionary contains keys such as 'id', 'name', 'email'.\n\n    Raises:\n        ValueError: If failed to fetch active users.\n    \"\"\"\n    try:\n        users = fetch_active_users()\n    except Exception as e:\n        raise ValueError(\"Failed to fetch active users\") from e\n    else:\n        return build_users_response(users)\n\n@app.post(\"/api/v1/users\")\ndef create_user(payload: dict):\n    validate_create_payload(payload)\n    created = persist_user(payload)\n    return {\"created\": created}\n\n\n@app.delete(\"/api/v1/users/{user_id}\")\ndef delete_user(user_id: int):\n    target = find_user_or_404(user_id)\n    return archive_user(target)\n\ndef validate_field(cls, v):\n        # Add validation logic\n        return v\n\ndef lcm(x, y):\n    return abs(x*y) // math.gcd(x, y)\n\ndef gcd(x, y):\n    while(y):\n        x, y = y, x % y\n    return x\n",
+  "content_hash": "0f975c6c10538959981a597bf64c362ff6bbe6f73506e9f98a462fe86267f073",
+  "metadata": {
+    "method": "GET",
+    "path": "/api/v1/",
+    "description": "generte a endpoint with lcm of two numbers",
+    "model_id": "ibm/granite-8b-code-instruct"
+  }
+}

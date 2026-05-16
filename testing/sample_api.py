@@ -53,10 +53,10 @@ def validate_field(cls, v):
         # Add validation logic
         return v
 
-def lcm(a, b):
-    return abs(a*b) // math.gcd(a, b)
+def lcm(x, y):
+    return abs(x*y) // math.gcd(x, y)
 
-def gcd(a, b):
-    while b:
-        a, b = b, a % b
-    return a
+def gcd(x, y):
+    while(y):
+        x, y = y, x % y
+    return x

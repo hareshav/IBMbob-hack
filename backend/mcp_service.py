@@ -1096,6 +1096,86 @@ def _build_retry_change_request(base_request: str, issues: List[str]) -> str:
     )
 
 
+def _build_manifest_repair_prompt(
+    *,
+    method: str,
+    path: str,
+    description: str,
+    target_rel: str,
+    current_manifest_text: str,
+    issues: List[str],
+) -> str:
+    """Build strict prompt for LLM-driven manifest repair."""
+    issue_lines = "\n".join(f"- {issue}" for issue in issues) or "- missing validation details"
+    manifest_preview = (current_manifest_text or "").strip()
+    if len(manifest_preview) > 8000:
+        manifest_preview = manifest_preview[:8000] + "\n...<truncated>..."
+
+    return (
+        "You are repairing an endpoint implementation manifest for a Python FastAPI workspace.\n"
+        f"Endpoint: {method} {path}\n"
+        f"Business requirement: {description}\n"
+        f"Primary API file (must contain route function): {target_rel}\n\n"
+        "Current validation failures:\n"
+        f"{issue_lines}\n\n"
+        "Current manifest/response:\n"
+        f"{manifest_preview}\n\n"
+        "Return ONLY valid JSON with this exact shape:\n"
+        "{\n"
+        '  "functions": [\n'
+        "    {\n"
+        '      "function_name": "str",\n'
+        '      "function_path": "relative/path.py",\n'
+        '      "function_desc": "str",\n'
+        '      "function_code": "full python function code string"\n'
+        "    }\n"
+        "  ],\n"
+        '  "summary": "str"\n'
+        "}\n\n"
+        "Hard requirements:\n"
+        "1) Include at least two functions in the list.\n"
+        "2) One function must be the endpoint route in the primary API file and include the route decorator.\n"
+        "3) At least one function must be in a separate helper file.\n"
+        "4) function_code must be complete runnable function definitions matching function_name.\n"
+        "5) Do not use markdown fences."
+    )
+
+
+def _repair_manifest_with_watsonx(
+    *,
+    method: str,
+    path: str,
+    description: str,
+    target_rel: str,
+    current_manifest_text: str,
+    issues: List[str],
+    selected_model_id: Optional[str],
+) -> Dict[str, Any]:
+    """Use watsonx model to repair incomplete endpoint manifest."""
+    if not _is_watsonx_runtime_enabled():
+        raise ValueError("watsonx runtime is not enabled for manifest repair.")
+
+    prompt = _build_manifest_repair_prompt(
+        method=method,
+        path=path,
+        description=description,
+        target_rel=target_rel,
+        current_manifest_text=current_manifest_text,
+        issues=issues,
+    )
+
+    watsonx_client = get_watsonx_client()
+    repaired_text = watsonx_client.generate_code(
+        prompt=prompt,
+        model_id=selected_model_id,
+        max_tokens=2600,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=1,
+    )
+    return _parse_agent_function_manifest(repaired_text)
+
+
 # ============================================================================
 # MCP Endpoints
 # ============================================================================
@@ -1220,6 +1300,8 @@ async def generate_endpoint(
         modified_paths: List[str] = []
         primary_text = ""
         manifest: Dict[str, Any] = {}
+        last_response_text = ""
+        used_manifest_repair = False
 
         for attempt in range(1, max_attempts + 1):
             attempt_used = attempt
@@ -1238,13 +1320,13 @@ async def generate_endpoint(
             )
 
             primary_text = target_file.read_text(encoding="utf-8") if target_file.exists() else ""
-            final_response_text = str(agent_result.get("final_response", "") or "")
+            last_response_text = str(agent_result.get("final_response", "") or "")
 
             validation_issues: List[str] = []
             manifest = {}
 
             try:
-                manifest = _parse_agent_function_manifest(final_response_text)
+                manifest = _parse_agent_function_manifest(last_response_text)
             except ValueError as exc:
                 validation_issues.append(str(exc))
 
@@ -1284,6 +1366,54 @@ async def generate_endpoint(
                 attempt_request = _build_retry_change_request(change_request, validation_issues)
                 continue
 
+            if _is_watsonx_runtime_enabled():
+                try:
+                    repaired_manifest = _repair_manifest_with_watsonx(
+                        method=request.method,
+                        path=request.path,
+                        description=request.description,
+                        target_rel=target_rel,
+                        current_manifest_text=last_response_text,
+                        issues=validation_issues,
+                        selected_model_id=selected_model_id,
+                    )
+                    applied_paths = _apply_manifest_functions(repaired_manifest, workspace_root)
+                    modified_paths = sorted({*modified_paths, *applied_paths})
+                    primary_text = target_file.read_text(encoding="utf-8") if target_file.exists() else ""
+
+                    repaired_issues: List[str] = []
+                    if not _manifest_has_primary_and_helper(
+                        repaired_manifest,
+                        target_file=target_file,
+                        workspace_root=workspace_root,
+                    ):
+                        repaired_issues.append(
+                            "Repaired manifest still missing primary API function and/or helper function."
+                        )
+                    repaired_issues.extend(_manifest_materialization_issues(repaired_manifest, workspace_root))
+                    if len(modified_paths) < 2:
+                        repaired_issues.append(
+                            "Repaired manifest did not result in multi-file writes (minimum 2 files required)."
+                        )
+                    if not _endpoint_decorator_exists(primary_text, request.method, request.path):
+                        repaired_issues.append(
+                            f"Route decorator for {request.method} {request.path} not found in target file after repair."
+                        )
+
+                    if not repaired_issues:
+                        manifest = repaired_manifest
+                        last_issues = []
+                        used_manifest_repair = True
+                        break
+
+                    validation_issues = repaired_issues
+                except Exception as repair_exc:
+                    validation_issues = [
+                        *validation_issues,
+                        f"LLM manifest repair stage failed: {repair_exc}",
+                    ]
+
+            last_issues = validation_issues
             detail_preview = "; ".join(last_issues[:5])
             raise HTTPException(
                 status_code=500,
@@ -1297,6 +1427,10 @@ async def generate_endpoint(
         if attempt_used > 1:
             warnings.append(
                 f"Endpoint implementation succeeded after {attempt_used} attempts with strict JSON validation."
+            )
+        if used_manifest_repair:
+            warnings.append(
+                "Manifest required a final watsonx LLM repair pass to complete multi-file implementation."
             )
 
         modified_summary = ", ".join(modified_paths[:6]) if modified_paths else "none"

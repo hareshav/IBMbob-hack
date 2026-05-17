@@ -13,9 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 load_dotenv(Path(__file__).with_name(".env"))
 try:
-    from langchain_agent_service import AutonomousWorkspaceAgent, DEFAULT_MODEL_ID
+    from langchain_agent_service import AutonomousWorkspaceAgent, DEFAULT_MODEL_ID, build_code_map
 except ModuleNotFoundError:  # pragma: no cover - import path differs when packaged
-    from backend.langchain_agent_service import AutonomousWorkspaceAgent, DEFAULT_MODEL_ID
+    from backend.langchain_agent_service import AutonomousWorkspaceAgent, DEFAULT_MODEL_ID, build_code_map
 
 
 app = FastAPI(title="IBM Bob MCP Service")
@@ -132,7 +132,12 @@ async def list_models() -> Dict[str, Any]:
 @app.post("/mcp/chat-completion")
 async def chat_completion(payload: ChatCompletionPayload) -> Dict[str, Any]:
     bridge_main = _import_main_helpers()
-    workspace_root = _ensure_workspace_root(bridge_main)
+    # Chat doesn't need an active workspace — fall back to cwd so the agent can be built.
+    workspace_root = (
+        Path(bridge_main.CURRENT_WORKSPACE_PATH).resolve()
+        if bridge_main.CURRENT_WORKSPACE_PATH
+        else Path.cwd()
+    )
     runtime_config = _load_runtime_config(bridge_main)
     agent = _build_agent(bridge_main, workspace_root, payload.model_id, runtime_config)
     try:
@@ -272,4 +277,100 @@ async def refactor_function(payload: RefactorPayload) -> Dict[str, Any]:
         "file_path": str(target_path),
         "relative_path": str(target_path.relative_to(workspace_root)).replace("\\", "/"),
         "graph": graph_payload,
+    }
+
+
+# ── AI Graph ─────────────────────────────────────────────────────────────────
+
+class AIGraphPayload(BaseModel):
+    path: str
+    model_id: Optional[str] = None
+
+
+@app.post("/mcp/ai-graph")
+async def ai_graph(payload: AIGraphPayload) -> Dict[str, Any]:
+    """
+    Ask IBM Bob AI to analyse a workspace and return a semantic graph.
+    The workspace can be a local path or a GitHub URL (cloned first).
+    """
+    bridge_main = _import_main_helpers()
+    runtime_config = _load_runtime_config(bridge_main)
+
+    # Resolve workspace root — local path or GitHub clone
+    raw_path = payload.path.strip()
+    workspace_root: Path
+
+    if raw_path.startswith(("http://", "https://", "git@")):
+        # GitHub URL — delegate to main.py's clone helper if available
+        clone_fn = getattr(bridge_main, "_clone_github_repo", None)
+        if not callable(clone_fn):
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub URL cloning is not available in this runtime.",
+            )
+        try:
+            workspace_root = Path(clone_fn(raw_path)).resolve()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to clone repo: {exc}") from exc
+    else:
+        workspace_root = Path(raw_path).resolve()
+        if not workspace_root.exists():
+            raise HTTPException(status_code=404, detail=f"Path not found: {workspace_root}")
+
+    # Build condensed code map
+    try:
+        code_map = build_code_map(workspace_root)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to build code map: {exc}") from exc
+
+    # Ask watsonx to analyse and return graph JSON
+    agent = _build_agent(bridge_main, workspace_root, payload.model_id, runtime_config)
+    try:
+        raw_graph = agent.analyze_graph(code_map)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI analysis failed: {exc}") from exc
+
+    # Normalise to React Flow node/edge format
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+
+    for n in raw_graph.get("nodes", []):
+        nodes.append({
+            "id": n["id"],
+            "type": "default",
+            "position": {"x": 0, "y": 0},  # dagre handles this on the frontend
+            "data": {
+                "label":       n.get("label", n["id"]),
+                "title":       n.get("label", n["id"]),
+                "kind":        n.get("kind", "function"),
+                "group":       n.get("group", "utils"),
+                "description": n.get("description", ""),
+                "file":        n.get("file", ""),
+                "risk":        0.0,
+                "fan_in":      0,
+                "fan_out":     0,
+                "state":       "calm",
+            },
+        })
+
+    for e in raw_graph.get("edges", []):
+        edge_type = e.get("edge_type", "call")
+        edges.append({
+            "id":     e.get("id", f"{e['source']}->{e['target']}"),
+            "source": e["source"],
+            "target": e["target"],
+            "animated": True,
+            "data": {"edge_type": edge_type},
+        })
+
+    return {
+        "nodes":          nodes,
+        "edges":          edges,
+        "summary":        raw_graph.get("summary", ""),
+        "workspace_path": str(workspace_root),
+        "source":         "ai",
     }

@@ -9,12 +9,28 @@ const KIND_CONFIG = {
   default:  { color: '#7C7F9A', icon: Box,       label: 'Node'     },
 };
 
-const FILTERS = [
+const KIND_FILTERS = [
   { value: 'all',      label: 'All'       },
-  { value: 'router',   label: 'Routers'   },
-  { value: 'function', label: 'Functions' },
   { value: 'input',    label: 'Inputs'    },
+  { value: 'function', label: 'Functions' },
   { value: 'output',   label: 'Outputs'   },
+  { value: 'router',   label: 'Routers'   },
+];
+
+const GROUP_FILTERS = [
+  { value: 'all',           label: 'All groups',    color: 'var(--accent-blue)' },
+  { value: 'api',           label: 'API',           color: '#7C7FF5' },
+  { value: 'auth',          label: 'Auth',          color: '#F7B955' },
+  { value: 'payments',      label: 'Payments',      color: '#1AE0A0' },
+  { value: 'database',      label: 'Database',      color: '#4F8EF7' },
+  { value: 'notifications', label: 'Notifs',        color: '#2ED8F0' },
+  { value: 'analytics',     label: 'Analytics',     color: '#B06EF7' },
+  { value: 'profile',       label: 'Profile',       color: '#2ED8F0' },
+  { value: 'content',       label: 'Content',       color: '#B06EF7' },
+  { value: 'moderation',    label: 'Moderation',    color: '#F56565' },
+  { value: 'governance',    label: 'Governance',    color: '#F56565' },
+  { value: 'learning',      label: 'Learning',      color: '#1AE0A0' },
+  { value: 'utils',         label: 'Utils',         color: '#7C7F9A' },
 ];
 
 export default function LeftSidebar({
@@ -31,17 +47,19 @@ export default function LeftSidebar({
   onDeleteSelectedNode,
   canEdit,
 }) {
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
+  const [search, setSearch]       = useState('');
+  const [kindFilter, setKindFilter] = useState('all');
+  const [groupFilter, setGroupFilter] = useState('all');
 
   const filtered = (nodes || []).filter((n) => {
-    const matchKind = filter === 'all' || n.data?.kind === filter;
+    const matchKind  = kindFilter  === 'all' || n.data?.kind  === kindFilter;
+    const matchGroup = groupFilter === 'all' || n.data?.group === groupFilter;
     const q = search.toLowerCase();
     const matchSearch = !q
       || (n.data?.label || '').toLowerCase().includes(q)
       || (n.data?.title || '').toLowerCase().includes(q)
       || (n.data?.file  || '').toLowerCase().includes(q);
-    return matchKind && matchSearch;
+    return matchKind && matchGroup && matchSearch;
   });
 
   return (
@@ -197,34 +215,42 @@ export default function LeftSidebar({
           )}
         </div>
 
-        {/* Filter chips */}
-        <div style={{
-          display: 'flex', gap: 3, paddingBottom: 10,
-          overflowX: 'auto', scrollbarWidth: 'none',
-        }}>
-          {FILTERS.map(({ value, label }) => {
-            const active = filter === value;
+        {/* Kind filter chips */}
+        <div style={{ display: 'flex', gap: 3, paddingBottom: 5, overflowX: 'auto', scrollbarWidth: 'none' }}>
+          {KIND_FILTERS.map(({ value, label }) => {
+            const active = kindFilter === value;
             const cfg = KIND_CONFIG[value] || KIND_CONFIG.default;
             const col = value === 'all' ? 'var(--accent-blue)' : cfg.color;
             return (
-              <button
-                key={value}
-                onClick={() => setFilter(value)}
-                style={{
-                  height: 20, padding: '0 7px',
-                  borderRadius: 100,
-                  background: active ? col + '18' : 'transparent',
-                  border: '1px solid',
-                  borderColor: active ? col + '50' : 'var(--border-subtle)',
-                  color: active ? col : 'var(--text-muted)',
-                  fontSize: 9.5, fontWeight: active ? 600 : 400,
-                  cursor: 'pointer',
-                  transition: 'all var(--t-fast)',
-                  whiteSpace: 'nowrap',
-                  fontFamily: 'inherit',
-                  flexShrink: 0,
-                }}
-              >
+              <button key={value} onClick={() => setKindFilter(value)} style={{
+                height: 20, padding: '0 7px', borderRadius: 100,
+                background: active ? col + '18' : 'transparent',
+                border: '1px solid', borderColor: active ? col + '50' : 'var(--border-subtle)',
+                color: active ? col : 'var(--text-muted)',
+                fontSize: 9.5, fontWeight: active ? 600 : 400,
+                cursor: 'pointer', transition: 'all var(--t-fast)',
+                whiteSpace: 'nowrap', fontFamily: 'inherit', flexShrink: 0,
+              }}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Group filter chips */}
+        <div style={{ display: 'flex', gap: 3, paddingBottom: 10, overflowX: 'auto', scrollbarWidth: 'none' }}>
+          {GROUP_FILTERS.map(({ value, label, color }) => {
+            const active = groupFilter === value;
+            return (
+              <button key={value} onClick={() => setGroupFilter(value)} style={{
+                height: 18, padding: '0 6px', borderRadius: 100,
+                background: active ? color + '18' : 'transparent',
+                border: '1px solid', borderColor: active ? color + '50' : 'var(--border-subtle)',
+                color: active ? color : 'var(--text-muted)',
+                fontSize: 8.5, fontWeight: active ? 600 : 400,
+                cursor: 'pointer', transition: 'all var(--t-fast)',
+                whiteSpace: 'nowrap', fontFamily: 'inherit', flexShrink: 0,
+              }}>
                 {label}
               </button>
             );
@@ -265,8 +291,11 @@ export default function LeftSidebar({
             const cfg = KIND_CONFIG[kind] || KIND_CONFIG.default;
             const Icon = cfg.icon;
             const isSelected = selectedNode?.id === node.id;
-            const label = node.data?.title || node.data?.label || node.id;
-            const file  = node.data?.file || '';
+            const label    = node.data?.title || node.data?.label || node.id;
+            const file     = node.data?.file || '';
+            const group    = node.data?.group;
+            const isRisky  = node.data?.state === 'risky';
+            const risk     = node.data?.risk ?? null;
 
             return (
               <button
@@ -312,25 +341,55 @@ export default function LeftSidebar({
 
                 {/* Text */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: 11.5, fontWeight: isSelected ? 600 : 500,
-                    color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    lineHeight: 1.4,
-                    fontFamily: "'JetBrains Mono', monospace",
-                    transition: 'color var(--t-fast)',
-                  }}>
-                    {label}
-                  </div>
-                  {file && (
-                    <div style={{
-                      fontSize: 9.5, color: 'var(--text-muted)',
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+                    <span style={{
+                      flex: 1, minWidth: 0,
+                      fontSize: 11.5, fontWeight: isSelected ? 600 : 500,
+                      color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      marginTop: 2,
-                      fontFamily: "'JetBrains Mono', monospace",
                       lineHeight: 1.4,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      transition: 'color var(--t-fast)',
                     }}>
-                      {file.split('/').slice(-2).join('/')}
+                      {label}
+                    </span>
+                    {isRisky && (
+                      <span style={{ fontSize: 7, fontWeight: 700, color: '#F56565', flexShrink: 0,
+                        padding: '1px 4px', borderRadius: 100,
+                        background: 'rgba(245,101,101,0.12)', border: '1px solid rgba(245,101,101,0.3)',
+                        textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        ⚠
+                      </span>
+                    )}
+                  </div>
+                  {(file || group) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      {file && (
+                        <span style={{
+                          fontSize: 9.5, color: 'var(--text-muted)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.4,
+                          flex: 1, minWidth: 0,
+                        }}>
+                          {file.split('/').slice(-2).join('/')}
+                        </span>
+                      )}
+                      {group && group !== 'utils' && (
+                        <span style={{
+                          fontSize: 8, fontWeight: 600, flexShrink: 0,
+                          color: GROUP_FILTERS.find(g => g.value === group)?.color || 'var(--text-muted)',
+                        }}>
+                          {group}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {risk !== null && risk > 0 && (
+                    <div style={{ marginTop: 3, height: 2, background: 'var(--border-subtle)', borderRadius: 100, overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%', width: `${Math.round(risk * 100)}%`, borderRadius: 100,
+                        background: risk > 0.6 ? '#F56565' : risk > 0.25 ? '#F7B955' : '#1AE0A0',
+                      }} />
                     </div>
                   )}
                 </div>

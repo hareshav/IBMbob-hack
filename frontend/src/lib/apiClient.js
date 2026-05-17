@@ -74,3 +74,12 @@ export async function requestChatCompletion(payload) {
   });
   return parseResponse(response);
 }
+
+export async function requestAIGraph(path, modelId) {
+  const response = await fetch(`${BACKEND_BASE_URL}/mcp/ai-graph`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, model_id: modelId || undefined }),
+  });
+  return parseResponse(response);
+}

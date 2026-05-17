@@ -738,6 +738,7 @@ def parse_workspace_files(
                 "file": rel_file,
                 "code": fn["code"],
                 "direct_calls": fn["calls"],
+                "group": infer_group(fn["name"], rel_file),
             }
             file_function_index[rel_file][fn["name"]] = fn_id
             name_index.setdefault(fn["name"], []).append(fn_id)
@@ -786,6 +787,54 @@ def parse_workspace_files(
 
     return functions, name_index, file_function_index, endpoints
 
+
+# ---------------------------------------------------------------------------
+# IBM-BOB: Semantic group patterns, sensitivity detection & risk scoring
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_PATTERNS: List[re.Pattern] = [
+    re.compile(p, re.I) for p in [
+        r"payment", r"auth", r"login", r"token", r"secret",
+        r"invoice", r"billing", r"charge", r"credit", r"wallet",
+        r"password", r"session", r"encrypt", r"decrypt", r"hash",
+    ]
+]
+
+_GROUP_PATTERNS: Dict[str, List[re.Pattern]] = {
+    "auth":          [re.compile(p, re.I) for p in [r"auth", r"login", r"logout", r"session", r"token", r"password", r"credential", r"signin", r"signup", r"oauth", r"jwt", r"verify"]],
+    "payments":      [re.compile(p, re.I) for p in [r"payment", r"invoice", r"billing", r"charge", r"credit", r"wallet", r"stripe", r"checkout", r"subscription", r"refund", r"transaction"]],
+    "notifications": [re.compile(p, re.I) for p in [r"notif", r"email", r"sms", r"alert", r"webhook", r"push", r"message", r"chat", r"inbox"]],
+    "analytics":     [re.compile(p, re.I) for p in [r"analytic", r"track", r"metric", r"event", r"report", r"dashboard", r"stat", r"insight", r"telemetry"]],
+    "database":      [re.compile(p, re.I) for p in [r"\bdb\b", r"database", r"repository", r"model", r"schema", r"query", r"orm", r"\bstore\b", r"storage", r"cache", r"redis"]],
+    "api":           [re.compile(p, re.I) for p in [r"controller", r"router", r"route", r"handler", r"endpoint", r"middleware", r"resolver", r"interceptor"]],
+    "governance":    [re.compile(p, re.I) for p in [r"proposal", r"vote", r"dao", r"govern", r"delegate", r"ballot", r"quorum"]],
+    "profile":       [re.compile(p, re.I) for p in [r"profile", r"avatar", r"account", r"member"]],
+    "content":       [re.compile(p, re.I) for p in [r"comment", r"feed", r"like", r"dislike", r"reply", r"thread", r"article", r"content"]],
+    "moderation":    [re.compile(p, re.I) for p in [r"flag", r"moderat", r"ban", r"spam", r"abuse"]],
+    "learning":      [re.compile(p, re.I) for p in [r"module", r"quiz", r"topic", r"progress", r"streak", r"course", r"lesson", r"learn", r"enroll"]],
+}
+
+
+def infer_group(name: str, file_path: str) -> str:
+    search = (name + " " + file_path).lower()
+    for group, patterns in _GROUP_PATTERNS.items():
+        if any(p.search(search) for p in patterns):
+            return group
+    return "utils"
+
+
+def is_sensitive(name: str) -> bool:
+    return any(p.search(name) for p in _SENSITIVE_PATTERNS)
+
+
+def compute_risk_score(fan_in: int, fan_out: int, sensitive: bool) -> float:
+    connectivity = min(1.0, (fan_in * 0.6 + fan_out * 0.4) / 15.0)
+    return round(min(1.0, connectivity + (0.35 if sensitive else 0.0)), 3)
+
+
+# ---------------------------------------------------------------------------
+# Virtual endpoints (unchanged)
+# ---------------------------------------------------------------------------
 
 def make_virtual_endpoints(
     functions: Dict[str, Dict[str, Any]],

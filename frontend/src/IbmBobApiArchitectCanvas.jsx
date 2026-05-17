@@ -14,8 +14,9 @@ import { ApiNode } from './components/ApiNode';
 import AIChatbot from './components/AIChatbot';
 import AIGenerateEndpoint from './components/AIGenerateEndpoint';
 import AIRefactorFunction from './components/AIRefactorFunction';
-import { fetchModelCatalog, loadMainFileGraph, saveFunctionContent } from './lib/apiClient';
+import { fetchModelCatalog, loadMainFileGraph, saveFunctionContent, requestAIGraph } from './lib/apiClient';
 import { GraphCtx } from './lib/graphContext';
+import { applyDagreLayout } from './lib/dagreLayout';
 
 /* ── Model list ── */
 const FALLBACK_MODELS = [
@@ -411,7 +412,7 @@ export default function IbmBobApiArchitectCanvas({
 
   const onConnect = useCallback(
     (conn) => setEdges((cur) => addEdge({
-      ...conn, animated: true, type: 'smoothstep',
+      ...conn, animated: true, type: 'default',
       style: { stroke: '#7C7FF5', strokeWidth: 1.8, opacity: 0.85 },
     }, cur)),
     [setEdges],
@@ -443,16 +444,21 @@ export default function IbmBobApiArchitectCanvas({
 
   /* ── Apply graph payload ── */
   const applyGraphPayload = useCallback((payload, nextStatus) => {
-    const gNodes = normalizeNodes(payload?.nodes || []);
-    /* Color edges based on their index for visual variety */
-    const EDGE_COLORS = ['#4F8EF7', '#7C7FF5', '#B06EF7', '#2ED8F0', '#1AE0A0'];
-    const gEdges = (payload?.edges || []).map((e, i) => {
-      const col = EDGE_COLORS[i % EDGE_COLORS.length];
+    const rawNodes = normalizeNodes(payload?.nodes || []);
+    /* Color edges by edge_type: api=cyan (thick), call=varied (thinner) */
+    const CALL_COLORS = ['#4F8EF7', '#7C7FF5', '#B06EF7', '#1AE0A0'];
+    let callIdx = 0;
+    const gEdges = (payload?.edges || []).map((e) => {
+      const edgeType = e.data?.edge_type;
+      const isApi = edgeType === 'api';
+      const col = isApi ? '#2ED8F0' : CALL_COLORS[callIdx++ % CALL_COLORS.length];
       return {
-        ...e, animated: true, type: 'smoothstep',
-        style: { stroke: col, strokeWidth: 1.8, opacity: 0.75 },
+        ...e, animated: true, type: 'default',
+        style: { stroke: col, strokeWidth: isApi ? 2.2 : 1.6, opacity: isApi ? 0.90 : 0.65 },
       };
     });
+    /* Apply dagre layout (IBM_BOB-style) to position nodes properly */
+    const gNodes = applyDagreLayout(rawNodes, gEdges);
     setNodes(gNodes); setEdges(gEdges);
     setSelectedNode((cur) => {
       if (cur?.id) { const retained = gNodes.find((n) => n.id === cur.id); if (retained) return retained; }
@@ -461,7 +467,7 @@ export default function IbmBobApiArchitectCanvas({
     if (nextStatus) setStatus(nextStatus);
   }, [normalizeNodes, setEdges, setNodes]);
 
-  /* ── Load graph ── */
+  /* ── Load graph (AST parser) ── */
   const loadGraph = useCallback(async () => {
     const path = mainFilePath.trim();
     if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
@@ -472,12 +478,30 @@ export default function IbmBobApiArchitectCanvas({
       applyGraphPayload(payload, `Loaded ${payload.nodes?.length || 0} nodes`);
       setLoadedFilePath(label); setWorkspacePath(payload.workspace_path || '');
       setSyntaxErrors([]);
-      /* signal that fitView should run after the next render cycle */
       pendingFitView.current = true;
     } catch (err) {
       setStatus(`Error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
     } finally { setIsLoadingGraph(false); }
   }, [applyGraphPayload, mainFilePath]);
+
+  /* ── Load graph (IBM Bob AI semantic analysis) ── */
+  const loadAIGraph = useCallback(async () => {
+    const path = mainFilePath.trim();
+    if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
+    setIsLoadingGraph(true);
+    setStatus('IBM Bob AI is reading your codebase…');
+    try {
+      const payload = await requestAIGraph(path, selectedModelId);
+      applyGraphPayload(payload, `AI graph: ${payload.nodes?.length || 0} components`);
+      setLoadedFilePath(payload.workspace_path || path);
+      setWorkspacePath(payload.workspace_path || '');
+      setSyntaxErrors([]);
+      if (payload.summary) setStatus(`AI: ${payload.summary}`);
+      pendingFitView.current = true;
+    } catch (err) {
+      setStatus(`AI Error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally { setIsLoadingGraph(false); }
+  }, [applyGraphPayload, mainFilePath, selectedModelId]);
 
   /* ── Node click ── */
   const onNodeClick = useCallback((evt, node) => {
@@ -504,16 +528,17 @@ export default function IbmBobApiArchitectCanvas({
 
     setIsNodeChatOpen(true);
 
-    /* If triggered from sidebar (no mouse event) pan canvas to show the node */
-    if (evt === null && node?.position) {
+    /* Always fly camera to the clicked node — longer zoom for direct clicks */
+    if (node?.position) {
+      const duration = evt === null ? 420 : 650;
+      const minZoom  = evt === null ? 0.6  : 0.9;
       setTimeout(() => {
         const rf = rfInstanceRef.current;
         if (!rf) return;
-        const zoom = Math.max(rf.getZoom(), 0.6);
         rf.setCenter(
           node.position.x + 110,
-          node.position.y + 60,
-          { duration: 420, zoom },
+          node.position.y + 55,
+          { duration, zoom: Math.max(rf.getZoom(), minZoom) },
         );
       }, 40);
     }
@@ -618,7 +643,7 @@ export default function IbmBobApiArchitectCanvas({
       >
         {nodes.length === 0 && <CanvasEmptyState isLoading={isLoadingGraph} />}
 
-        <GraphCtx.Provider value={{ connectedNodeIds }}>
+        <GraphCtx.Provider value={{ connectedNodeIds, hasSelection: Boolean(selectedNode?.id) }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -632,7 +657,7 @@ export default function IbmBobApiArchitectCanvas({
           onViewportChange={handleViewportChange}
           connectionLineStyle={{ stroke: 'rgba(79,142,247,0.6)', strokeWidth: 1.5 }}
           defaultEdgeOptions={{
-            animated: true, type: 'smoothstep',
+            animated: true, type: 'default',
             style: { stroke: '#7C7FF5', strokeWidth: 1.8, opacity: 0.8 },
           }}
           /* Navigation */
@@ -653,10 +678,17 @@ export default function IbmBobApiArchitectCanvas({
             pannable zoomable
             nodeColor={(n) => {
               const k = n.data?.kind;
-              if (k === 'input')    return '#2ED8F0';
-              if (k === 'output')   return '#1AE0A0';
-              if (k === 'router')   return '#4F8EF7';
-              if (k === 'function') return '#B06EF7';
+              const g = n.data?.group;
+              if (k === 'input')  return '#2ED8F0';
+              if (k === 'output') return '#1AE0A0';
+              if (k === 'router') return '#4F8EF7';
+              if (k === 'function') {
+                const GC = { api:'#7C7FF5', auth:'#F7B955', payments:'#1AE0A0',
+                  notifications:'#2ED8F0', analytics:'#B06EF7', database:'#4F8EF7',
+                  governance:'#F56565', profile:'#2ED8F0', content:'#B06EF7',
+                  moderation:'#F56565', learning:'#1AE0A0', utils:'#7C7F9A' };
+                return GC[g] || '#B06EF7';
+              }
               return '#7C7F9A';
             }}
             maskColor={theme === 'light'
@@ -786,6 +818,7 @@ export default function IbmBobApiArchitectCanvas({
           mainFilePath={mainFilePath}
           onMainFilePathChange={setMainFilePath}
           onLoadGraph={loadGraph}
+          onLoadAIGraph={loadAIGraph}
           isLoading={isLoadingGraph}
           loadedFilePath={loadedFilePath}
           status={status}
@@ -847,7 +880,7 @@ export default function IbmBobApiArchitectCanvas({
           right: 60,
           top: 72,
           zIndex: 24,
-          animation: 'fadeInUp 220ms cubic-bezier(0.34,1.56,0.64,1) forwards',
+          animation: 'fadeInUp 320ms cubic-bezier(0.34,1.56,0.64,1) forwards',
         }}>
           <NodeChat
             node={selectedNode}
@@ -863,11 +896,32 @@ export default function IbmBobApiArchitectCanvas({
         top: 72, right: 0, bottom: 0,
         width: 440,
         transform: showCodePanel ? 'translateX(0)' : 'translateX(440px)',
-        transition: 'transform 0.32s cubic-bezier(0.4, 0, 0.2, 1)',
+        transition: 'transform 0.42s cubic-bezier(0.34, 1.25, 0.64, 1)',
         zIndex: 22,
-        boxShadow: showCodePanel ? '-6px 0 48px rgba(0,0,0,0.55)' : 'none',
+        boxShadow: showCodePanel ? '-6px 0 60px rgba(0,0,0,0.65), -2px 0 0 rgba(79,142,247,0.15)' : 'none',
         willChange: 'transform',
+        overflow: 'hidden',
       }}>
+        {/* Animated left-edge glow when panel is open */}
+        {showCodePanel && (
+          <div style={{
+            position: 'absolute', left: 0, top: 0, bottom: 0, width: 2,
+            background: 'linear-gradient(180deg, #4F8EF7 0%, #B06EF7 50%, #2ED8F0 100%)',
+            backgroundSize: '100% 300%',
+            animation: 'gradientShift 4s ease infinite, edgeGlow 2s ease-in-out infinite',
+            pointerEvents: 'none', zIndex: 10,
+          }} />
+        )}
+        {/* Scan-line sweep — replays each time a new function is focused */}
+        {showCodePanel && (
+          <div key={activeFunctionId} style={{
+            position: 'absolute', top: 0, left: 0, right: 0, height: 3,
+            background: 'linear-gradient(90deg, transparent 0%, #4F8EF7 30%, #B06EF7 60%, #2ED8F0 80%, transparent 100%)',
+            pointerEvents: 'none', zIndex: 11,
+            animation: 'panelScan 0.72s cubic-bezier(0.4, 0, 0.6, 1) forwards',
+            boxShadow: '0 0 16px 4px rgba(79,142,247,0.45)',
+          }} />
+        )}
         <CodeSidebar
           selectedTitle={selectedNode?.data?.title}
           filePath={selectedNode?.data?.file || ''}

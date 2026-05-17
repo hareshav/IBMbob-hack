@@ -70,10 +70,10 @@ export default function NodeChat({ node, selectedModelId, onClose }) {
   }, [messages]);
 
   const buildContext = useCallback(() => {
-    const parts = [`Node: ${title}`, `Kind: ${kind}`];
-    if (node?.data?.file) parts.push(`File: ${node.data.file}`);
-    if (node?.data?.code) parts.push(`Code:\n${node.data.code}`);
-    return parts.join('\n');
+    const ctx = { node: title, kind };
+    if (node?.data?.file) ctx.file = node.data.file;
+    if (node?.data?.code) ctx.code = node.data.code;
+    return ctx;
   }, [title, kind, node]);
 
   const sendMessage = useCallback(async (text) => {
@@ -85,12 +85,11 @@ export default function NodeChat({ node, selectedModelId, onClose }) {
     try {
       const history = messages.map((m) => ({ role: m.role, content: m.content }));
       const result  = await requestChatCompletion({
-        message: trimmed,
+        messages: [...history, { role: 'user', content: trimmed }],
         context: buildContext(),
-        conversation_history: history,
         model_id: selectedModelId,
       });
-      const reply = result.response || result.message || 'No response.';
+      const reply = result.content || result.response || result.message || 'No response.';
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
     } catch (err) {
       setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${err.message}` }]);

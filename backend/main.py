@@ -86,6 +86,9 @@ try:
             parse_workspace_files as _lp_parse_workspace_files,
             make_virtual_endpoints as _lp_make_virtual_endpoints,
             EXCLUDED_DIR_NAMES as _LP_EXCLUDED,
+            infer_group as _lp_infer_group,
+            is_sensitive as _lp_is_sensitive,
+            compute_risk_score as _lp_compute_risk_score,
         )
     except ModuleNotFoundError:
         from backend.language_parsers import (
@@ -96,12 +99,35 @@ try:
             parse_workspace_files as _lp_parse_workspace_files,
             make_virtual_endpoints as _lp_make_virtual_endpoints,
             EXCLUDED_DIR_NAMES as _LP_EXCLUDED,
+            infer_group as _lp_infer_group,
+            is_sensitive as _lp_is_sensitive,
+            compute_risk_score as _lp_compute_risk_score,
         )
     MULTILANG_READY = True
 except Exception as _lp_exc:  # noqa: BLE001
     logger.warning("language_parsers not available — Python-only mode: %s", _lp_exc)
     MULTILANG_READY = False
     _LP_EXCLUDED: Set[str] = set()
+    import re as _re
+    def _lp_infer_group(name: str, file_path: str) -> str:  # type: ignore[misc]
+        s = (name + " " + file_path).lower()
+        for pat, grp in [("auth|login|token|session|password|jwt|oauth", "auth"),
+                         ("payment|invoice|billing|charge|wallet|stripe", "payments"),
+                         ("notif|email|sms|alert|webhook|push|message", "notifications"),
+                         ("analytic|track|metric|report|dashboard|stat", "analytics"),
+                         ("db|database|repository|model|schema|query|cache", "database"),
+                         ("controller|router|route|handler|endpoint|middleware", "api"),
+                         ("profile|avatar|account|member", "profile"),
+                         ("comment|feed|like|reply|thread|article|content", "content"),
+                         ("flag|moderat|ban|spam|abuse", "moderation"),
+                         ("learn|course|lesson|quiz|enroll|progress", "learning")]:
+            if _re.search(pat, s, _re.I):
+                return grp
+        return "utils"
+    def _lp_is_sensitive(name: str) -> bool:  # type: ignore[misc]
+        return bool(_re.search(r"auth|login|token|password|payment|secret|encrypt|session", name, _re.I))
+    def _lp_compute_risk_score(fan_in: int, fan_out: int, sensitive: bool) -> float:  # type: ignore[misc]
+        return round(min(1.0, min(1.0, (fan_in * 0.6 + fan_out * 0.4) / 15.0) + (0.35 if sensitive else 0.0)), 3)
 
 EXCLUDED_PARTS = {".venv", "__pycache__", "node_modules", ".bob", ".git",
                   "dist", "build", ".next", "out", "target", "vendor",
@@ -777,11 +803,13 @@ def _parse_python_files(
     return functions, name_index, file_function_index, endpoints
 
 
-def _build_workspace_graph(workspace_path: str, main_file_path: Optional[str] = None) -> Dict[str, Any]:
+def _build_workspace_graph(workspace_path: str, main_file_path: Optional[str] = None) -> Dict[str, Any]:  # noqa: C901
+    from collections import defaultdict
+
     workspace_root, source_files = _resolve_graph_context(workspace_path, main_file_path)
     builtin_names: Set[str] = set(dir(builtins))
 
-    # Detect dominant language in the collected files
+    # ── Parse source files ────────────────────────────────────────────────────
     first_lang = (
         (_lp_detect_language(source_files[0]) if MULTILANG_READY else None)
         if source_files else None
@@ -802,199 +830,172 @@ def _build_workspace_graph(workspace_path: str, main_file_path: Optional[str] = 
         if not endpoints and functions:
             endpoints = _lp_make_virtual_endpoints(functions)
         if not endpoints:
-            lang_label = first_lang.capitalize()
             raise HTTPException(
                 status_code=404,
-                detail=f"No functions or endpoints found in {lang_label} workspace.",
+                detail=f"No functions or endpoints found in {first_lang.capitalize()} workspace.",
             )
 
+    # ── Resolve call graph (direct_calls → function IDs) ─────────────────────
     function_calls: Dict[str, List[str]] = {}
-    for function_id, function_meta in functions.items():
-        filtered_calls: List[str] = []
-        seen_targets: Set[str] = set()
-        caller_file = function_meta["file"]
-
-        for called_name in function_meta["direct_calls"]:
+    for fn_id, fn_meta in functions.items():
+        seen: Set[str] = set()
+        resolved: List[str] = []
+        for called_name in fn_meta.get("direct_calls", []):
             if called_name in builtin_names:
                 continue
+            target: Optional[str] = file_function_index.get(fn_meta["file"], {}).get(called_name)
+            if not target:
+                global_m = name_index.get(called_name, [])
+                if len(global_m) == 1:
+                    target = global_m[0]
+            if target and target != fn_id and target not in seen:
+                seen.add(target)
+                resolved.append(target)
+        function_calls[fn_id] = resolved
 
-            target_id: Optional[str] = None
-            same_file_match = file_function_index.get(caller_file, {}).get(called_name)
-            if same_file_match:
-                target_id = same_file_match
-            else:
-                global_matches = name_index.get(called_name, [])
-                if len(global_matches) == 1:
-                    target_id = global_matches[0]
+    # ── IBM-BOB: fan-in / fan-out / risk / group / state ─────────────────────
+    fan_out: Dict[str, int] = {fid: len(calls) for fid, calls in function_calls.items()}
+    fan_in:  Dict[str, int] = {}
+    for calls in function_calls.values():
+        for tid in calls:
+            fan_in[tid] = fan_in.get(tid, 0) + 1
 
-            if not target_id:
+    for fn_id, fn_meta in functions.items():
+        fi = fan_in.get(fn_id, 0)
+        fo = fan_out.get(fn_id, 0)
+        sensitive = _lp_is_sensitive(fn_meta["name"] + " " + fn_meta["file"])
+        risk = _lp_compute_risk_score(fi, fo, sensitive)
+        fn_meta.setdefault("group", _lp_infer_group(fn_meta["name"], fn_meta["file"]))
+        fn_meta.update({"risk": risk, "fan_in": fi, "fan_out": fo,
+                        "state": "risky" if risk > 0.25 else "calm"})
+
+    # ── IBM-BOB: layered layout (BFS depth from endpoint roots) ──────────────
+    GROUP_ORDER = ["api", "auth", "payments", "database", "notifications",
+                   "analytics", "profile", "content", "moderation",
+                   "governance", "learning", "utils"]
+
+    layers: Dict[str, int] = {}
+    for ep in endpoints:
+        root = ep["root_function_id"]
+        queue: List[tuple] = [(root, 0)]
+        while queue:
+            fid, depth = queue.pop(0)
+            if fid not in functions:
                 continue
-            if target_id == function_id:
+            if fid in layers and layers[fid] <= depth:
                 continue
-            if target_id in seen_targets:
-                continue
+            layers[fid] = depth
+            for called in function_calls.get(fid, []):
+                if called not in layers or layers[called] > depth + 1:
+                    queue.append((called, depth + 1))
 
-            seen_targets.add(target_id)
-            filtered_calls.append(target_id)
+    max_layer = max(layers.values(), default=0)
 
-        function_calls[function_id] = filtered_calls
+    # Which functions to show: reachable from endpoints + those that call reachable ones
+    reachable: Set[str] = set(layers.keys())
+    also_callers = {fid for fid, calls in function_calls.items()
+                    if any(c in reachable for c in calls)}
+    visible_fns: Set[str] = reachable | also_callers
+    if not visible_fns:
+        visible_fns = set(functions.keys())
 
+    for fid in visible_fns:
+        layers.setdefault(fid, max_layer + 1)
+
+    # Sort visible functions into (layer, group) buckets
+    layer_grp: Dict[int, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+    for fid in visible_fns:
+        layer_grp[layers[fid]][functions[fid]["group"]].append(fid)
+
+    # Assign x/y positions
+    INPUT_X     = 60.0
+    FN_X_START  = 360.0
+    LAYER_X_STEP = 300.0
+    NODE_H      = 115.0
+    GROUP_GAP   = 30.0
+    START_Y     = 80.0
+
+    fn_positions: Dict[str, Dict[str, float]] = {}
+    for layer_num in sorted(layer_grp.keys()):
+        x = FN_X_START + layer_num * LAYER_X_STEP
+        y = START_Y
+        for grp in GROUP_ORDER:
+            grp_fns = sorted(layer_grp[layer_num].get(grp, []))
+            for fid in grp_fns:
+                fn_positions[fid] = {"x": float(x), "y": float(y)}
+                y += NODE_H
+            if grp_fns:
+                y += GROUP_GAP
+
+    # ── Build nodes & edges ───────────────────────────────────────────────────
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
+    added_edge_ids: Set[str] = set()
 
-    start_x = 70
-    step_x = 260
-    row_gap_y = 110
-    endpoint_gap_y = 150
-    top_cursor_y = 90.0
+    # Input nodes — one per API endpoint (left column)
+    ep_y = START_Y
+    for ep in endpoints:
+        input_id = f'input::{ep["id"]}'
+        nodes.append({
+            "id": input_id,
+            "type": "default",
+            "position": {"x": INPUT_X, "y": ep_y},
+            "data": {
+                "label": f'{ep["method"]} {ep["route_path"]}',
+                "kind": "input",
+                "title": f'{ep["method"]} {ep["route_path"]}',
+                "file": ep["file"],
+                "code": ep.get("code", ""),
+                "group": "api",
+                "risk": 0.0, "fan_in": 0, "fan_out": 1, "state": "calm",
+            },
+        })
+        root_id = ep["root_function_id"]
+        if root_id in visible_fns:
+            eid = f"{input_id}->{root_id}"
+            if eid not in added_edge_ids:
+                added_edge_ids.add(eid)
+                edges.append({"id": eid, "source": input_id, "target": root_id,
+                               "animated": True, "data": {"edge_type": "api"}})
+        ep_y += 150.0
 
-    for endpoint in endpoints:
-        call_tree = _build_call_tree(
-            endpoint_id=endpoint["id"],
-            root_function_id=endpoint["root_function_id"],
-            function_calls=function_calls,
-        )
-        positions: Dict[str, Dict[str, float]] = {}
-        _assign_tree_positions(
-            tree_node=call_tree,
-            depth=1,
-            start_x=start_x,
-            step_x=step_x,
-            row_gap_y=row_gap_y,
-            cursor_y=top_cursor_y,
-            positions=positions,
-        )
+    # Function nodes — all visible functions
+    for fid in visible_fns:
+        fn = functions[fid]
+        pos = fn_positions.get(fid, {"x": FN_X_START, "y": START_Y})
+        nodes.append({
+            "id": fid,
+            "type": "default",
+            "position": pos,
+            "data": {
+                "label": fn["name"],
+                "kind": "function",
+                "title": fn["name"],
+                "file": fn["file"],
+                "function_id": fn["id"],
+                "code": fn.get("code", ""),
+                "group": fn["group"],
+                "risk": fn["risk"],
+                "fan_in": fn["fan_in"],
+                "fan_out": fn["fan_out"],
+                "state": fn["state"],
+            },
+        })
 
-        root_node_id = call_tree["id"]
-        root_position = positions[root_node_id]
-        input_node_id = f'{endpoint["id"]}::input'
-        output_node_id = f'{endpoint["id"]}::output'
-
-        nodes.append(
-            {
-                "id": input_node_id,
-                "type": "input",
-                "position": {"x": start_x, "y": root_position["y"]},
-                "data": {
-                    "label": f'{endpoint["method"]} {endpoint["route_path"]}\nInput',
-                    "kind": "input",
-                    "title": f'{endpoint["method"]} {endpoint["route_path"]}',
-                    "file": endpoint["file"],
-                    "code": endpoint["code"] or "# Endpoint handler source not found.",
-                },
-                "style": {
-                    "background": "#1f2433",
-                    "color": "#f4f4f4",
-                    "border": "1px solid #0f62fe",
-                    "borderRadius": 10,
-                    "padding": 10,
-                    "width": 240,
-                },
-            }
-        )
-
-        def append_tree_nodes(tree_node: Dict[str, Any]) -> None:
-            function_id = tree_node["function_id"]
-            fn_meta = functions.get(function_id)
-            if not fn_meta:
-                return
-
-            fn_node_id = tree_node["id"]
-            node_position = positions[fn_node_id]
-
-            nodes.append(
-                {
-                    "id": fn_node_id,
-                    "type": "default",
-                    "position": {"x": node_position["x"], "y": node_position["y"]},
-                    "data": {
-                        "label": fn_meta["name"],
-                        "kind": "function",
-                        "title": fn_meta["name"],
-                        "file": fn_meta["file"],
-                        "function_id": fn_meta["id"],
-                        "code": fn_meta["code"] or "# Function source not found.",
-                    },
-                    "style": {
-                        "background": "#20202f",
-                        "color": "#f4f4f4",
-                        "border": "1px solid #39394c",
-                        "borderRadius": 10,
-                        "padding": 10,
-                        "width": 240,
-                    },
-                }
-            )
-
-            for child_node in tree_node["children"]:
-                child_id = child_node["id"]
-                edges.append(
-                    {
-                        "id": f"{fn_node_id}->{child_id}",
-                        "source": fn_node_id,
-                        "target": child_id,
-                        "animated": True,
-                        "style": {"stroke": "#0f62fe"},
-                    }
-                )
-                append_tree_nodes(child_node)
-
-        append_tree_nodes(call_tree)
-
-        edges.append(
-            {
-                "id": f"{input_node_id}->{root_node_id}",
-                "source": input_node_id,
-                "target": root_node_id,
-                "animated": True,
-                "style": {"stroke": "#0f62fe"},
-            }
-        )
-
-        max_depth = _tree_max_depth(call_tree)
-        output_x = start_x + (max_depth + 2) * step_x
-        output_y = root_position["y"]
-
-        nodes.append(
-            {
-                "id": output_node_id,
-                "type": "output",
-                "position": {"x": output_x, "y": output_y},
-                "data": {
-                    "label": "Output",
-                    "kind": "output",
-                    "title": "Output",
-                    "file": endpoint["file"],
-                    "code": "# Output node for response flow.",
-                },
-                "style": {
-                    "background": "#1f2433",
-                    "color": "#f4f4f4",
-                    "border": "1px solid #0f62fe",
-                    "borderRadius": 10,
-                    "padding": 10,
-                    "width": 220,
-                },
-            }
-        )
-
-        edges.append(
-            {
-                "id": f"{root_node_id}->{output_node_id}",
-                "source": root_node_id,
-                "target": output_node_id,
-                "animated": True,
-                "style": {"stroke": "#0f62fe"},
-            }
-        )
-
-        leaf_count = _tree_leaf_count(call_tree)
-        tree_visual_height = max(1, leaf_count - 1) * row_gap_y
-        top_cursor_y += tree_visual_height + endpoint_gap_y
+    # Call edges — function → called function
+    for fid in visible_fns:
+        for tid in function_calls.get(fid, []):
+            if tid not in visible_fns:
+                continue
+            eid = f"{fid}->{tid}"
+            if eid not in added_edge_ids:
+                added_edge_ids.add(eid)
+                edges.append({"id": eid, "source": fid, "target": tid,
+                               "animated": True, "data": {"edge_type": "call"}})
 
     return {
         "workspace_path": str(workspace_root),
-        "source_files": [_safe_relative(path, workspace_root) for path in source_files],
+        "source_files": [_safe_relative(p, workspace_root) for p in source_files],
         "nodes": nodes,
         "edges": edges,
     }

@@ -8,7 +8,7 @@ import {
 export default function WorkspaceNavbar({
   onBack, mode, theme, onToggleTheme,
   mainFilePath, onMainFilePathChange,
-  onLoadGraph, isLoading, loadedFilePath,
+  onLoadGraph, onLoadAIGraph, isLoading, loadedFilePath,
   availableModels, selectedModelId, onSelectedModelIdChange,
   isLoadingModels,
   onOpenChatbot, onOpenGenerateEndpoint, onOpenRefactorFunction,
@@ -115,12 +115,12 @@ export default function WorkspaceNavbar({
           />
         </div>
 
-        {/* Load Graph button */}
+        {/* Load Graph button (AST parser) */}
         <button
           onClick={onLoadGraph}
           disabled={isLoading}
           style={{
-            height: 34, padding: '0 18px',
+            height: 34, padding: '0 16px',
             borderRadius: 8,
             background: isLoading ? 'var(--bg-elevated)' : 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 100%)',
             color: '#fff', border: 'none',
@@ -148,7 +148,53 @@ export default function WorkspaceNavbar({
         >
           {isLoading
             ? <><RefreshCw size={12} className="animate-spin" /> Analyzing</>
-            : <><Play size={12} strokeWidth={2.5} /> Load Graph</>
+            : <><Play size={12} strokeWidth={2.5} /> Parse</>
+          }
+        </button>
+
+        {/* Ask Bob AI button */}
+        <button
+          onClick={onLoadAIGraph}
+          disabled={isLoading}
+          title="Let IBM Bob AI analyse the codebase and build the graph semantically"
+          style={{
+            height: 34, padding: '0 16px',
+            borderRadius: 8,
+            background: isLoading
+              ? 'var(--bg-elevated)'
+              : 'linear-gradient(135deg, #1AE0A0 0%, #2ED8F0 100%)',
+            color: isLoading ? 'var(--text-muted)' : '#0a0a12',
+            border: 'none',
+            fontSize: 12.5, fontWeight: 700,
+            cursor: isLoading ? 'not-allowed' : 'pointer',
+            flexShrink: 0,
+            display: 'flex', alignItems: 'center', gap: 6,
+            transition: 'all 150ms ease',
+            opacity: isLoading ? 0.5 : 1,
+            whiteSpace: 'nowrap',
+            letterSpacing: '0.01em',
+            fontFamily: "'JetBrains Mono', monospace",
+            boxShadow: isLoading ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+          }}
+          onMouseEnter={(e) => {
+            if (!isLoading) {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.boxShadow = '0 5px 22px rgba(26,224,160,0.55), inset 0 1px 0 rgba(255,255,255,0.22)';
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'none';
+            e.currentTarget.style.boxShadow = isLoading ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+          }}
+        >
+          {isLoading
+            ? <><RefreshCw size={12} className="animate-spin" /> Bob thinking…</>
+            : <>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                </svg>
+                Ask Bob AI
+              </>
           }
         </button>
       </div>

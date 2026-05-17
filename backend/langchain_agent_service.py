@@ -168,7 +168,7 @@ def _load_watsonx_credentials(
     return {
         "url": url,
         "project_id": project_id,
-        "api_key": api_key,
+        "apikey": api_key,
     }
 
 
@@ -205,7 +205,7 @@ class AutonomousWorkspaceAgent:
             model_id=self.model_id,
             project_id=self.credentials["project_id"],
             url=self.credentials["url"],
-            api_key=self.credentials["api_key"],
+            apikey=self.credentials["apikey"],
             temperature=0.2,
             max_tokens=2500,
             disable_streaming=True,
@@ -478,3 +478,197 @@ class AutonomousWorkspaceAgent:
         artifact["relative_path"] = str(target_path.relative_to(self.workspace_root)).replace("\\", "/")
         artifact["source_before"] = source_code
         return artifact
+
+    def analyze_graph(self, code_map: str) -> Dict[str, Any]:
+        """Ask watsonx to analyse a condensed code map and return a graph structure."""
+        model = self._build_chat_model()
+
+        # Concise prompt — Granite responds better to short, direct instructions
+        prompt = (
+            "You are a software architect. Analyse the codebase below and output ONLY "
+            "a raw JSON object (no markdown, no explanation, no extra text).\n\n"
+            "Required JSON shape:\n"
+            '{"summary":"<one sentence>","nodes":[{"id":"<snake_id>","label":"<name>",'
+            '"kind":"<input|function|module>","group":"<auth|payments|database|api|'
+            'notifications|analytics|profile|content|moderation|governance|learning|utils>",'
+            '"description":"<brief>","file":"<path>"}],'
+            '"edges":[{"id":"<src>-><tgt>","source":"<src>","target":"<tgt>",'
+            '"edge_type":"<api|call|dependency>"}]}\n\n'
+            "kind=input → HTTP route/endpoint. kind=function → handler/service/util. "
+            "kind=module → top-level class or standalone module.\n"
+            "Add an edge for every call, import, or dependency.\n\n"
+            f"CODEBASE:\n{code_map}\n\n"
+            "Output the JSON object now:"
+        )
+
+        response = model.invoke(prompt)
+        raw = getattr(response, "content", str(response)).strip()
+        return _parse_ai_json(raw)
+
+
+# ── Robust JSON extractor for model responses ────────────────────────────────
+
+def _parse_ai_json(text: str) -> Dict[str, Any]:
+    """
+    Extract and parse a JSON object from a model response.
+    Handles: markdown fences, leading explanation, trailing text, trailing commas.
+    """
+    import json as _json, re as _re  # noqa: PLC0415
+
+    # 1. Strip all markdown code fences (```json ... ``` or ``` ... ```)
+    text = _re.sub(r'```(?:json)?\s*', '', text)
+    text = _re.sub(r'```', '', text).strip()
+
+    # 2. Try direct parse (model obeyed instructions perfectly)
+    try:
+        return _json.loads(text)
+    except _json.JSONDecodeError:
+        pass
+
+    # 3. Brace-counting extraction of first complete {...} block
+    extracted = _brace_extract(text)
+    if extracted:
+        # 3a. Try raw extracted block
+        try:
+            return _json.loads(extracted)
+        except _json.JSONDecodeError:
+            pass
+        # 3b. Repair trailing commas (common model mistake)
+        repaired = _re.sub(r',\s*([}\]])', r'\1', extracted)
+        try:
+            return _json.loads(repaired)
+        except _json.JSONDecodeError:
+            pass
+
+    raise ValueError(
+        f"IBM Bob AI returned a response that could not be parsed as JSON.\n"
+        f"Raw (first 400 chars): {text[:400]}"
+    )
+
+
+def _brace_extract(text: str) -> Optional[str]:
+    """Return the first syntactically complete {...} JSON object in text."""
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+# ── Standalone code-map builder ───────────────────────────────────────────────
+
+_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", ".next", "dist", "build",
+    ".venv", "venv", "env", ".env", "coverage", ".pytest_cache",
+}
+_SOURCE_EXTS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go",
+    ".rb", ".php", ".rs", ".cs", ".mjs", ".cjs", ".sol",
+}
+_MAX_FILES = 50
+_MAX_MAP_CHARS = 9_000   # ~2 250 tokens — leaves room for prompt + JSON output
+
+
+def build_code_map(workspace_root: Path) -> str:
+    """
+    Walk workspace_root and produce a condensed text summary suitable for an LLM prompt.
+    Extracts: file path, HTTP routes, class/function signatures, imports.
+    Does NOT include full function bodies.
+    """
+    import re as _re  # noqa: PLC0415
+
+    lines: List[str] = [f"WORKSPACE: {workspace_root.name}\n"]
+    files_seen = 0
+
+    for path in sorted(workspace_root.rglob("*")):
+        if files_seen >= _MAX_FILES:
+            break
+        if not path.is_file():
+            continue
+        if any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        if path.suffix not in _SOURCE_EXTS:
+            continue
+
+        rel = path.relative_to(workspace_root)
+        try:
+            src = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        file_lines: List[str] = [f"\nFILE: {rel}"]
+
+        if path.suffix == ".py":
+            # Routes / decorators
+            for m in _re.finditer(r'@\w+\.(?:get|post|put|delete|patch)\(["\']([^"\']+)', src, _re.I):
+                file_lines.append(f"  ROUTE: {m.group(1)}")
+            # Class and function signatures only
+            try:
+                tree = ast.parse(src)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        bases = ", ".join(ast.unparse(b) for b in node.bases) if node.bases else ""
+                        file_lines.append(f"  CLASS: {node.name}({bases})")
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        args = ast.unparse(node.args)
+                        deco = " ".join(f"@{ast.unparse(d)}" for d in node.decorator_list)
+                        sig = f"{'async ' if isinstance(node, ast.AsyncFunctionDef) else ''}def {node.name}({args})"
+                        file_lines.append(f"  {'  ' if deco else ''}FN: {sig}{(' [' + deco + ']') if deco else ''}")
+            except SyntaxError:
+                pass
+            # Top-level imports
+            for m in _re.finditer(r'^(?:import|from)\s+\S+', src, _re.M):
+                file_lines.append(f"  IMPORT: {m.group().strip()}")
+
+        elif path.suffix == ".sol":
+            # Solidity — contracts, functions, events
+            for m in _re.finditer(r'\bcontract\s+(\w+)', src):
+                file_lines.append(f"  CONTRACT: {m.group(1)}")
+            for m in _re.finditer(r'\bfunction\s+(\w+)\s*\(([^)]*)\)', src):
+                file_lines.append(f"  FN: {m.group(1)}({m.group(2).strip()})")
+            for m in _re.finditer(r'\bevent\s+(\w+)\s*\(', src):
+                file_lines.append(f"  EVENT: {m.group(1)}")
+
+        else:
+            # JS/TS/Java/Go etc. — lightweight regex extraction
+            for m in _re.finditer(
+                r'(?:export\s+)?(?:async\s+)?(?:function|class|const|def|func)\s+(\w+)',
+                src, _re.M
+            ):
+                file_lines.append(f"  SYMBOL: {m.group(1)}")
+            for m in _re.finditer(r'(?:import|require)\s*[("\']([^"\'()]+)', src, _re.M):
+                file_lines.append(f"  IMPORT: {m.group(1)}")
+            # Express/FastAPI style routes
+            for m in _re.finditer(r'\.(get|post|put|delete|patch)\(["\']([^"\']+)', src, _re.I):
+                file_lines.append(f"  ROUTE: {m.group(1).upper()} {m.group(2)}")
+
+        if len(file_lines) > 1:
+            # Stop adding files once we approach the char cap
+            candidate = "\n".join(lines + file_lines)
+            if len(candidate) > _MAX_MAP_CHARS:
+                lines.append(f"\n[... {_MAX_FILES - files_seen} more files omitted ...]")
+                break
+            lines.extend(file_lines)
+            files_seen += 1
+
+    return "\n".join(lines)

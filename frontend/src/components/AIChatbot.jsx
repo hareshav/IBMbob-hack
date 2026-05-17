@@ -26,16 +26,18 @@ export default function AIChatbot({ isOpen, onClose, context, selectedModelId })
 
     try {
       const data = await requestChatCompletion({
-        message: userMessage,
+        messages: [
+          ...messages.slice(-6).map((m) => ({ role: m.role, content: m.content })),
+          { role: 'user', content: userMessage },
+        ],
         context: context || {},
-        conversation_history: messages.slice(-6),
         model_id: selectedModelId || undefined,
       });
       setMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: data.message,
+          content: data.content || data.message || 'No response.',
           code_snippets: data.code_snippets || [],
           actions: data.actions || [],
         },

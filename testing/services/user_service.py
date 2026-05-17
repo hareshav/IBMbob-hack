@@ -36,7 +36,7 @@ def build_users_response(users: List[dict]) -> dict:
     """
     Builds a response object containing user information.
 
-    Args:
+    Args: 
         users (List[dict]): A list of dictionaries representing user data.
 
     Returns:
@@ -71,5 +71,5 @@ def find_user_or_404(user_id):
 
 
 def archive_user(user):
-    user["active"] = False
+    user["active"] = False 
     return {"deleted": user["id"], "active": user["active"]}

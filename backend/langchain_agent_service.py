@@ -1,500 +1,480 @@
-"""
-Autonomous LangChain workspace agent powered by IBM watsonx (ChatWatsonx).
+"""LangChain-based orchestration for IBM watsonx endpoint generation.
 
-This script accepts:
-1) a target file path inside a workspace, and
-2) an architectural change request,
-then autonomously reads, plans, and writes code updates using tool calling.
-
-Usage example:
-    python backend/langchain_agent_service.py ^
-        --workspace-root . ^
-        --target-file testing/sampleapi.py ^
-        --change-request "Add a POST /analytics route, create its subfile controller, and export it correctly."
-
-Required environment variables (or CLI flags):
-    WATSONX_API_KEY (or deprecated WATSONX_APIKEY)
-    WATSONX_PROJECT_ID
-    WATSONX_URL (optional, defaults to https://us-south.ml.cloud.ibm.com)
+The service generates structured function artifacts, validates the updated source,
+and returns data that the MCP layer can persist and reflect back into the graph.
 """
 
 from __future__ import annotations
 
-import argparse
-import hashlib
-import json
+import ast
 import os
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import BaseTool, tool
-from langchain_ibm import ChatWatsonx
+
+try:
+    from langchain_ibm import ChatWatsonx
+except ModuleNotFoundError as exc:  # pragma: no cover - validated at runtime
+    raise RuntimeError("langchain-ibm is required for the Watsonx agent runtime.") from exc
 
 
 DEFAULT_MODEL_ID = "ibm/granite-8b-code-instruct"
-DEFAULT_WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
 DEFAULT_MAX_ITERATIONS = 24
+DEFAULT_WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
 
-IGNORED_LISTING_DIRS = {
-    ".git",
-    ".venv",
-    "node_modules",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    "dist",
-    "build",
-}
-
-
-@dataclass
-class WorkspaceWrite:
-    """Tracks one write operation applied by the agent."""
-
-    relative_path: str
-    bytes_written: int
-    sha256: str
-    timestamp_utc: str
-
-
-@dataclass
-class WorkspaceContext:
-    """Runtime filesystem context shared by tools."""
-
-    workspace_root: Path
-    writes: List[WorkspaceWrite] = field(default_factory=list)
-    max_list_entries: int = 2000
-    max_list_depth: int = 6
-
-    def resolve_path(
-        self,
-        user_path: str,
-        *,
-        must_exist: bool = False,
-        expect_dir: bool = False,
-    ) -> Path:
-        """Resolve a user-supplied path safely inside workspace_root."""
-        if not user_path or not user_path.strip():
-            raise ValueError("Path cannot be empty.")
-
-        raw = user_path.strip().strip('"').strip("'")
-        candidate = Path(raw)
-
-        if candidate.is_absolute():
-            resolved = candidate.resolve()
-        else:
-            normalized = raw.lstrip("/\\")
-            resolved = (self.workspace_root / normalized).resolve()
-
-        root_resolved = self.workspace_root.resolve()
-        try:
-            resolved.relative_to(root_resolved)
-        except ValueError as exc:
-            raise ValueError(
-                f"Path '{user_path}' escapes workspace root '{root_resolved}'."
-            ) from exc
-
-        if must_exist and not resolved.exists():
-            raise FileNotFoundError(f"Path does not exist: {resolved}")
-
-        if expect_dir and resolved.exists() and not resolved.is_dir():
-            raise NotADirectoryError(f"Expected a directory path: {resolved}")
-
-        return resolved
-
-
-def _timestamp_utc() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _coerce_message_content(content: Any) -> str:
-    """Best-effort normalization for AI message content to plain text."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text_part = item.get("text")
-                if isinstance(text_part, str):
-                    parts.append(text_part)
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False))
-            else:
-                parts.append(str(item))
-        return "\n".join(parts).strip()
-    return str(content)
-
-
-def _build_tools(context: WorkspaceContext) -> List[BaseTool]:
-    """Create tool instances bound to the runtime workspace context."""
-
-    @tool
-    def read_workspace_file(file_path: str) -> str:
-        """
-        Safely read and return UTF-8 text content for a workspace file.
-
-        Args:
-            file_path: Relative or absolute path (must remain inside workspace root).
-        """
-
-        try:
-            resolved = context.resolve_path(file_path, must_exist=True, expect_dir=False)
-            if resolved.is_dir():
-                return f"ERROR: '{file_path}' points to a directory, not a file."
-            return resolved.read_text(encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            return f"ERROR: read_workspace_file failed for '{file_path}': {exc}"
-
-    @tool
-    def write_workspace_file(file_path: str, content: str) -> str:
-        """
-        Create/update a workspace file with provided UTF-8 text content.
-
-        Parent directories are created automatically when missing.
-
-        Args:
-            file_path: Relative or absolute path (must remain inside workspace root).
-            content: Full file content that will be written.
-        """
-
-        try:
-            resolved = context.resolve_path(file_path, must_exist=False, expect_dir=False)
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
-
-            data = content.encode("utf-8")
-            rel = resolved.relative_to(context.workspace_root.resolve()).as_posix()
-            context.writes.append(
-                WorkspaceWrite(
-                    relative_path=rel,
-                    bytes_written=len(data),
-                    sha256=hashlib.sha256(data).hexdigest(),
-                    timestamp_utc=_timestamp_utc(),
-                )
-            )
-            return f"OK: wrote '{rel}' ({len(data)} bytes)."
-        except Exception as exc:  # noqa: BLE001
-            return f"ERROR: write_workspace_file failed for '{file_path}': {exc}"
-
-    @tool
-    def list_directory_structure(dir_path: str) -> list:
-        """
-        List directory/file structure under a workspace directory.
-
-        Returns relative paths from workspace root. Directories end with '/'.
-
-        Args:
-            dir_path: Relative or absolute directory path inside workspace.
-        """
-
-        try:
-            resolved = context.resolve_path(dir_path, must_exist=True, expect_dir=True)
-            root = context.workspace_root.resolve()
-
-            entries: List[str] = []
-            walk_root = resolved.resolve()
-
-            for current_root, dirs, files in os.walk(walk_root):
-                current_path = Path(current_root).resolve()
-                rel_from_start = current_path.relative_to(walk_root)
-                depth = len(rel_from_start.parts)
-
-                dirs[:] = sorted(
-                    d
-                    for d in dirs
-                    if d not in IGNORED_LISTING_DIRS and not d.startswith(".")
-                )
-                files = sorted(f for f in files if not f.startswith("."))
-
-                if depth > context.max_list_depth:
-                    dirs[:] = []
-                    continue
-
-                rel_current_from_workspace = current_path.relative_to(root)
-                for d in dirs:
-                    entries.append(f"{(rel_current_from_workspace / d).as_posix()}/")
-                for f in files:
-                    entries.append((rel_current_from_workspace / f).as_posix())
-
-                if len(entries) >= context.max_list_entries:
-                    return entries[: context.max_list_entries]
-
-            return entries
-        except Exception as exc:  # noqa: BLE001
-            return [f"ERROR: list_directory_structure failed for '{dir_path}': {exc}"]
-
-    return [read_workspace_file, write_workspace_file, list_directory_structure]
-
-
-class AutonomousWorkspaceAgent:
-    """Tool-calling LangChain agent loop for codebase modifications."""
-
-    def __init__(
-        self,
-        *,
-        workspace_root: Path,
-        model_id: str,
-        watsonx_url: str,
-        watsonx_project_id: str,
-        watsonx_api_key: str,
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
-        verbose: bool = False,
-    ) -> None:
-        self.context = WorkspaceContext(workspace_root=workspace_root.resolve())
-        self.max_iterations = max_iterations
-        self.verbose = verbose
-
-        self.tools = _build_tools(self.context)
-        self.tool_map = {tool.name: tool for tool in self.tools}
-
-        params = {
-            "decoding_method": "greedy",
-            "temperature": 0.0,
-            "max_tokens": 2048,
-        }
-
-        # Support both current and deprecated constructor field names.
-        try:
-            self.model = ChatWatsonx(
-                model_id=model_id,
-                url=watsonx_url,
-                project_id=watsonx_project_id,
-                api_key=watsonx_api_key,
-                params=params,
-            )
-        except TypeError:
-            self.model = ChatWatsonx(
-                model_id=model_id,
-                url=watsonx_url,
-                project_id=watsonx_project_id,
-                apikey=watsonx_api_key,
-                params=params,
-            )
-
-        self.model_with_tools = self.model.bind_tools(self.tools)
-
-    def _invoke_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
-        tool_obj = self.tool_map.get(tool_name)
-        if tool_obj is None:
-            return f"ERROR: unknown tool '{tool_name}'. Available tools: {list(self.tool_map)}"
-        try:
-            return tool_obj.invoke(tool_args)
-        except Exception as exc:  # noqa: BLE001
-            return f"ERROR: tool '{tool_name}' execution failed: {exc}"
-
-    def run(self, *, target_file: str, change_request: str) -> Dict[str, Any]:
-        """Execute multi-step tool-calling loop and return final summary."""
-        self.context.writes.clear()
-
-        system_prompt = (
-            "You are a senior autonomous software modification agent. "
-            "You must edit a local Python workspace using tools only.\n\n"
-            "Execution rules:\n"
-            "1) Start by calling read_workspace_file on the provided target file.\n"
-            "2) Discover related modules with list_directory_structure and additional reads.\n"
-            "3) Plan exact changes before writing.\n"
-            "4) Use write_workspace_file with full final file contents.\n"
-            "5) Keep edits minimal and production-safe.\n"
-            "6) When done, return a concise summary including modified files and reasoning.\n"
-            "7) Never fabricate file contents; always read first unless creating new file intentionally.\n"
-            "8) If the request specifies a strict response schema (for example JSON), "
-            "return exactly that schema in plain text without markdown fences."
-        )
-
-        human_prompt = (
-            f"Workspace root: {self.context.workspace_root.as_posix()}\n"
-            f"Target file: {target_file}\n"
-            f"Architectural request: {change_request}\n\n"
-            "Execute the changes now."
-        )
-
-        messages: List[Any] = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_prompt),
-        ]
-
-        final_response_text = ""
-        iterations_used = 0
-
-        for iteration in range(1, self.max_iterations + 1):
-            iterations_used = iteration
-            ai_msg = self.model_with_tools.invoke(messages)
-            if not isinstance(ai_msg, AIMessage):
-                raise RuntimeError(f"Unexpected model output type: {type(ai_msg)}")
-
-            messages.append(ai_msg)
-
-            if self.verbose:
-                print(f"\n[iteration {iteration}] model response received")
-                if ai_msg.tool_calls:
-                    print(f"tool calls: {len(ai_msg.tool_calls)}")
-
-            invalid_calls = getattr(ai_msg, "invalid_tool_calls", []) or []
-            if invalid_calls:
-                messages.append(
-                    HumanMessage(
-                        content=(
-                            "Your previous tool call had invalid JSON arguments. "
-                            "Please re-issue valid tool calls."
-                        )
-                    )
-                )
-                continue
-
-            tool_calls = ai_msg.tool_calls or []
-            if not tool_calls:
-                final_response_text = _coerce_message_content(ai_msg.content)
-                break
-
-            for call in tool_calls:
-                tool_name = call.get("name", "")
-                tool_args = call.get("args", {}) or {}
-                tool_call_id = call.get("id")
-
-                tool_result = self._invoke_tool_call(tool_name, tool_args)
-                if isinstance(tool_result, (dict, list)):
-                    tool_content = json.dumps(tool_result, ensure_ascii=False, indent=2)
-                else:
-                    tool_content = str(tool_result)
-
-                messages.append(
-                    ToolMessage(
-                        content=tool_content,
-                        tool_call_id=tool_call_id,
-                        name=tool_name,
-                    )
-                )
-
-                if self.verbose:
-                    preview = tool_content[:160].replace("\n", " ")
-                    print(f"  -> tool {tool_name}({tool_args}) => {preview}")
-
-        if not final_response_text:
-            final_response_text = (
-                "Agent reached max iterations before producing a final text response."
-            )
-
-        return {
-            "target_file": target_file,
-            "change_request": change_request,
-            "iterations_used": iterations_used,
-            "max_iterations": self.max_iterations,
-            "model_id": getattr(self.model, "model_id", None) or "unknown",
-            "final_response": final_response_text,
-            "modified_files": [
-                {
-                    "path": w.relative_path,
-                    "bytes_written": w.bytes_written,
-                    "sha256": w.sha256,
-                    "timestamp_utc": w.timestamp_utc,
-                }
-                for w in self.context.writes
-            ],
-            "modified_file_count": len(self.context.writes),
-        }
-
-
-def _require_value(value: Optional[str], name: str) -> str:
-    if value and value.strip():
-        return value.strip()
-    raise RuntimeError(f"Missing required configuration: {name}")
-
-
-def _load_runtime_config(args: argparse.Namespace) -> Dict[str, str]:
-    """Load watsonx runtime configuration from CLI args and environment."""
-    load_dotenv(Path(__file__).with_name(".env"))
-    load_dotenv(Path.cwd() / ".env")
-
-    api_key = (
-        args.watsonx_api_key
-        or os.getenv("WATSONX_API_KEY")
-        or os.getenv("WATSONX_APIKEY")
-    )
-    project_id = args.watsonx_project_id or os.getenv("WATSONX_PROJECT_ID")
-    url = args.watsonx_url or os.getenv("WATSONX_URL") or DEFAULT_WATSONX_URL
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(Path(__file__).with_name(".env"))
+
+
+class FunctionArgumentSpec(BaseModel):
+    name: str = Field(..., description="Argument name.")
+    type: str = Field(default="Any", description="Python type annotation to use.")
+    default: Optional[str] = Field(default=None, description="Default value as Python source.")
+    description: Optional[str] = Field(default=None, description="What the argument represents.")
+
+
+class GeneratedFunctionSpec(BaseModel):
+    func_name: str = Field(..., description="Function name.")
+    func_path: str = Field(..., description="HTTP route path or source location the function implements.")
+    func_args: List[FunctionArgumentSpec] = Field(default_factory=list, description="Function arguments.")
+    path_operation_decorator: Optional[str] = Field(default=None, description="Primary FastAPI path operation decorator for endpoint handlers.")
+    decorators: List[str] = Field(default_factory=list, description="Function decorators, including FastAPI path operation decorators.")
+    source_file: Optional[str] = Field(default=None, description="Relative or absolute file path where this function should be written.")
+    func_code: str = Field(..., description="Complete top-level Python function code.")
+    purpose: Optional[str] = Field(default=None, description="Short summary of the function's role.")
+
+
+class EndpointGenerationPlan(BaseModel):
+    explanation: str = Field(..., description="Why the generated functions fit the request.")
+    functions: List[GeneratedFunctionSpec] = Field(default_factory=list, description="Structured generated functions.")
+    warnings: List[str] = Field(default_factory=list, description="Warnings about assumptions or limitations.")
+    suggestions: List[str] = Field(default_factory=list, description="Recommended follow-up actions.")
+
+
+class FunctionRefactorPlan(BaseModel):
+    explanation: str = Field(..., description="Why the refactor works.")
+    generated_code: str = Field(..., description="Refactored function code.")
+    warnings: List[str] = Field(default_factory=list, description="Warnings about assumptions or limitations.")
+    suggestions: List[str] = Field(default_factory=list, description="Recommended follow-up actions.")
+
+
+def _strip_code_fences(code: str) -> str:
+    text = (code or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+def _ensure_trailing_newline(text: str) -> str:
+    return text if text.endswith("\n") else f"{text}\n"
+
+
+def _endpoint_decorator_lines(route_method: Optional[str], route_path: Optional[str]) -> List[str]:
+    if not route_method or not route_path:
+        return []
+
+    method = route_method.strip().upper()
+    path = route_path.strip()
+    if not method or not path:
+        return []
+
+    if method == "GET":
+        return [f'@app.get("{path}")']
+    if method == "POST":
+        return [f'@app.post("{path}")']
+    if method == "PUT":
+        return [f'@app.put("{path}")']
+    if method == "DELETE":
+        return [f'@app.delete("{path}")']
+    if method == "PATCH":
+        return [f'@app.patch("{path}")']
+    return [f'@app.api_route("{path}", methods=["{method}"])']
+
+
+def _inject_decorator(block: str, decorator_lines: List[str]) -> str:
+    if not decorator_lines:
+        return block
+
+    lines = block.splitlines()
+    if any(line.lstrip().startswith("@app.") or line.lstrip().startswith("@router.") for line in lines):
+        return block
+
+    insert_index = None
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            insert_index = index
+            break
+
+    if insert_index is None:
+        return block
+
+    return "\n".join([*lines[:insert_index], *decorator_lines, *lines[insert_index:]])
+
+
+def _source_function_names(source: str) -> List[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    names: List[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.append(node.name)
+    return names
+def _default_service_target_path(target_path: Path) -> Path:
+    return target_path.parent / "services" / "generated_service.py"
+
+def _module_import_path(workspace_root: Path, file_path: Path) -> str:
+    relative_path = file_path.resolve().relative_to(workspace_root.resolve())
+    module_parts = list(relative_path.with_suffix("").parts)
+    return ".".join(module_parts)
+
+def _append_code_block(source_code: str, generated_code: str) -> str:
+    cleaned_code = _ensure_trailing_newline(_strip_code_fences(generated_code))
+    if not cleaned_code.strip():
+        raise RuntimeError("Generated code is empty.")
+
+    candidate = source_code.rstrip() + "\n\n" + cleaned_code if source_code.strip() else cleaned_code
+    ast.parse(candidate)
+    return candidate
+    return names
+
+
+def _load_watsonx_credentials(
+    watsonx_url: Optional[str] = None,
+    watsonx_project_id: Optional[str] = None,
+    watsonx_api_key: Optional[str] = None,
+) -> Dict[str, str]:
+    url = (watsonx_url or os.getenv("WATSONX_URL") or DEFAULT_WATSONX_URL).strip()
+    project_id = (watsonx_project_id or os.getenv("WATSONX_PROJECT_ID") or "").strip()
+    api_key = (watsonx_api_key or os.getenv("WATSONX_API_KEY") or os.getenv("WATSONX_APIKEY") or "").strip()
+
+    missing: List[str] = []
+    if not project_id:
+        missing.append("WATSONX_PROJECT_ID")
+    if not api_key:
+        missing.append("WATSONX_API_KEY")
+    if missing:
+        raise RuntimeError(f"Missing watsonx credentials: {', '.join(missing)}")
 
     return {
-        "watsonx_api_key": _require_value(api_key, "WATSONX_API_KEY"),
-        "watsonx_project_id": _require_value(project_id, "WATSONX_PROJECT_ID"),
-        "watsonx_url": url.strip(),
+        "url": url,
+        "project_id": project_id,
+        "api_key": api_key,
     }
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Autonomous LangChain code-modification agent using ChatWatsonx."
-    )
-    parser.add_argument(
-        "--workspace-root",
-        default=".",
-        help="Workspace root path where reads/writes are allowed (default: current directory).",
-    )
-    parser.add_argument(
-        "--target-file",
-        required=True,
-        help="Primary file path to inspect first (e.g., testing/sampleapi.py).",
-    )
-    parser.add_argument(
-        "--change-request",
-        required=True,
-        help="Architectural change request text.",
-    )
-    parser.add_argument(
-        "--model-id",
-        default=DEFAULT_MODEL_ID,
-        help=f"watsonx model ID (default: {DEFAULT_MODEL_ID}).",
-    )
-    parser.add_argument("--watsonx-url", default=None, help="watsonx service URL.")
-    parser.add_argument("--watsonx-project-id", default=None, help="watsonx project ID.")
-    parser.add_argument("--watsonx-api-key", default=None, help="watsonx API key.")
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=DEFAULT_MAX_ITERATIONS,
-        help=f"Maximum agent iterations (default: {DEFAULT_MAX_ITERATIONS}).",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print per-iteration tool activity.",
-    )
-    return parser
+@dataclass
+class GeneratedFileChange:
+    file_path: str
+    relative_path: str
+    source_before: str
+    source_after: str
+    generated_code: str
 
 
-def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+class AutonomousWorkspaceAgent:
+    """LangChain orchestration for endpoint and function transformations."""
 
-    config = _load_runtime_config(args)
-    workspace_root = Path(args.workspace_root).resolve()
-    if not workspace_root.exists() or not workspace_root.is_dir():
-        raise RuntimeError(f"Workspace root is invalid: {workspace_root}")
+    def __init__(
+        self,
+        workspace_root: Path,
+        model_id: str = DEFAULT_MODEL_ID,
+        watsonx_url: Optional[str] = None,
+        watsonx_project_id: Optional[str] = None,
+        watsonx_api_key: Optional[str] = None,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        verbose: bool = False,
+    ) -> None:
+        self.workspace_root = Path(workspace_root).resolve()
+        self.model_id = model_id or DEFAULT_MODEL_ID
+        self.credentials = _load_watsonx_credentials(watsonx_url, watsonx_project_id, watsonx_api_key)
+        self.max_iterations = max_iterations
+        self.verbose = verbose
 
-    agent = AutonomousWorkspaceAgent(
-        workspace_root=workspace_root,
-        model_id=args.model_id,
-        watsonx_url=config["watsonx_url"],
-        watsonx_project_id=config["watsonx_project_id"],
-        watsonx_api_key=config["watsonx_api_key"],
-        max_iterations=max(1, args.max_iterations),
-        verbose=args.verbose,
-    )
+    def _build_chat_model(self) -> ChatWatsonx:
+        return ChatWatsonx(
+            model_id=self.model_id,
+            project_id=self.credentials["project_id"],
+            url=self.credentials["url"],
+            api_key=self.credentials["api_key"],
+            temperature=0.2,
+            max_tokens=2500,
+            disable_streaming=True,
+        )
 
-    result = agent.run(
-        target_file=args.target_file,
-        change_request=args.change_request,
-    )
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    def _generate_plan(
+        self,
+        source_code: str,
+        change_request: str,
+        target_file: str,
+        route_method: Optional[str] = None,
+        route_path: Optional[str] = None,
+    ) -> EndpointGenerationPlan:
+        existing_function_names = _source_function_names(source_code)
+        schema = self._build_chat_model().with_structured_output(EndpointGenerationPlan)
+        prompt = (
+            "You are generating code for an existing Python API file.\n"
+            "Return a structured JSON plan that the app can write into the file immediately.\n"
+            "Rules:\n"
+            "1. The first function must be the FastAPI endpoint handler for the requested route.\n"
+            "2. The endpoint handler must include the correct FastAPI decorator for the requested method and path.\n"
+            "3. The endpoint handler JSON must include the decorator text in a decorators array, for example [\"@app.get(\\\"/path\\\")\"].\n"
+            "4. The endpoint handler JSON must also include path_operation_decorator with the primary decorator string.\n"
+            "5. If the endpoint needs supporting logic, put those helper functions in a services module and set their source_file to that services file.\n"
+            "6. Each function must include func_name, func_path, func_args, path_operation_decorator, decorators, source_file, and func_code.\n"
+            "7. func_code must be valid Python source and must not be wrapped in markdown fences.\n"
+            "8. Reuse existing imports and helpers from the file when possible.\n"
+            "9. Do not invent unrelated changes, and do not return plain utility functions unless they are helpers for the endpoint.\n"
+            "10. If the target file already defines a function with the same name, choose a new name unless the request is explicitly a replacement.\n\n"
+            f"Target file: {target_file}\n"
+            f"Requested HTTP method: {route_method or 'N/A'}\n"
+            f"Requested route path: {route_path or 'N/A'}\n"
+            f"Existing top-level function names: {', '.join(existing_function_names) if existing_function_names else 'none'}\n\n"
+            "Current source code:\n"
+            f"{source_code}\n\n"
+            "Task:\n"
+            f"{change_request}\n"
+        )
+        return schema.invoke(prompt)
 
+    def _generate_refactor_plan(
+        self,
+        source_code: str,
+        function_name: str,
+        refactor_goal: str,
+        preserve_signature: bool,
+    ) -> FunctionRefactorPlan:
+        schema = self._build_chat_model().with_structured_output(FunctionRefactorPlan)
+        prompt = (
+            "You are a LangChain code refactoring agent.\n"
+            "Return a JSON object that contains a refactored function body in generated_code.\n"
+            f"Function name: {function_name}\n"
+            f"Preserve signature: {preserve_signature}\n"
+            "Current source:\n"
+            f"{source_code}\n\n"
+            "Refactor goal:\n"
+            f"{refactor_goal}\n"
+        )
+        return schema.invoke(prompt)
 
-if __name__ == "__main__":
-    main()
+    def _apply_generated_code(self, source_code: str, generated_code: str) -> str:
+        cleaned_code = _ensure_trailing_newline(_strip_code_fences(generated_code))
+        if not cleaned_code.strip():
+            raise RuntimeError("Generated code is empty.")
+
+        candidate = source_code.rstrip() + "\n\n" + cleaned_code
+        ast.parse(candidate)
+        return candidate
+
+    def generate_endpoint_artifacts(
+        self,
+        target_file: Path,
+        change_request: str,
+        route_method: Optional[str] = None,
+        route_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_path = Path(target_file).resolve()
+        plan = self._generate_plan(
+            source_code=target_path.read_text(encoding="utf-8"),
+            change_request=change_request,
+            target_file=str(target_path),
+            route_method=route_method,
+            route_path=route_path,
+        )
+
+        if not plan.functions:
+            raise RuntimeError("The model did not return any generated functions.")
+
+        generated_blocks = [_strip_code_fences(function.func_code) for function in plan.functions]
+        decorator_lines = _endpoint_decorator_lines(route_method, route_path)
+        if generated_blocks:
+            generated_blocks[0] = _inject_decorator(generated_blocks[0], decorator_lines)
+            plan.functions[0].path_operation_decorator = decorator_lines[0] if decorator_lines else None
+            if plan.functions[0].decorators == []:
+                plan.functions[0].decorators = decorator_lines
+            elif decorator_lines and decorator_lines[0] not in plan.functions[0].decorators:
+                plan.functions[0].decorators = [*plan.functions[0].decorators, *decorator_lines]
+        service_target_path = _default_service_target_path(target_path)
+        helper_functions = plan.functions[1:]
+        helper_names = [function.func_name for function in helper_functions if function.func_name]
+
+        file_blocks: Dict[str, List[str]] = {}
+        for index, function in enumerate(plan.functions):
+            if index == 0:
+                function.source_file = str(target_path)
+            elif helper_functions:
+                function.source_file = str(service_target_path)
+            else:
+                function.source_file = str(target_path)
+
+            generated_block = _strip_code_fences(function.func_code)
+            if index == 0:
+                generated_block = _inject_decorator(generated_block, decorator_lines)
+                function.path_operation_decorator = decorator_lines[0] if decorator_lines else None
+                if function.decorators == []:
+                    function.decorators = decorator_lines
+                elif decorator_lines and decorator_lines[0] not in function.decorators:
+                    function.decorators = [*function.decorators, *decorator_lines]
+
+                if helper_names:
+                    import_line = f"from services.generated_service import {', '.join(helper_names)}"
+                    if import_line not in generated_block:
+                        generated_block = f"{import_line}\n{generated_block}"
+
+            file_blocks.setdefault(function.source_file or str(target_path), []).append(generated_block)
+
+        file_changes: List[Dict[str, Any]] = []
+        primary_change: Optional[Dict[str, Any]] = None
+        for file_name, blocks in file_blocks.items():
+            file_path = Path(file_name)
+            existing_source = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            combined_code = "\n\n".join(block.strip() for block in blocks if block.strip())
+            if not combined_code.strip():
+                continue
+            updated_source = _append_code_block(existing_source, combined_code)
+            file_change = {
+                "file_path": str(file_path),
+                "relative_path": str(file_path.relative_to(self.workspace_root)).replace("\\", "/"),
+                "source_before": existing_source,
+                "source_after": updated_source,
+                "generated_code": _ensure_trailing_newline(combined_code),
+            }
+            file_changes.append(file_change)
+            if file_path.resolve() == target_path.resolve():
+                primary_change = file_change
+
+        if primary_change is None:
+            raise RuntimeError("The model returned no primary endpoint code.")
+
+        return {
+            "explanation": plan.explanation,
+            "warnings": plan.warnings,
+            "suggestions": plan.suggestions,
+            "functions": [function.model_dump() for function in plan.functions],
+            "generated_code": primary_change["generated_code"],
+            "source_before": primary_change["source_before"],
+            "source_after": primary_change["source_after"],
+            "file_path": primary_change["file_path"],
+            "relative_path": primary_change["relative_path"],
+            "file_changes": file_changes,
+        }
+
+    def apply_generated_code(
+        self,
+        target_file: Path,
+        generated_code: str,
+    ) -> GeneratedFileChange:
+        target_path = Path(target_file).resolve()
+        source_code = target_path.read_text(encoding="utf-8")
+        updated_source = self._apply_generated_code(source_code, generated_code)
+        return GeneratedFileChange(
+            file_path=str(target_path),
+            relative_path=str(target_path.relative_to(self.workspace_root)).replace("\\", "/"),
+            source_before=source_code,
+            source_after=updated_source,
+            generated_code=_ensure_trailing_newline(_strip_code_fences(generated_code)),
+        )
+
+    def refactor_function(
+        self,
+        source_code: str,
+        function_name: str,
+        refactor_goal: str,
+        preserve_signature: bool,
+    ) -> Dict[str, Any]:
+        plan = self._generate_refactor_plan(
+            source_code=source_code,
+            function_name=function_name,
+            refactor_goal=refactor_goal,
+            preserve_signature=preserve_signature,
+        )
+
+        cleaned_code = _ensure_trailing_newline(_strip_code_fences(plan.generated_code))
+        if not cleaned_code.strip():
+            raise RuntimeError("The model returned empty refactored code.")
+
+        # Parse and extract only the top-level function definition the model returned.
+        try:
+            tree = ast.parse(cleaned_code)
+        except SyntaxError:
+            # If the returned code isn't valid Python, return it as-is so callers can inspect it.
+            return {
+                "explanation": plan.explanation,
+                "generated_code": cleaned_code,
+                "warnings": plan.warnings,
+                "suggestions": plan.suggestions,
+            }
+
+        func_node = None
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                func_node = node
+                break
+
+        if func_node is None:
+            # No function found; return cleaned_code as a fallback.
+            result_code = cleaned_code
+        else:
+            lines = cleaned_code.splitlines(keepends=True)
+            start = max(getattr(func_node, "lineno", 1) - 1, 0)
+            end = max(getattr(func_node, "end_lineno", start + 1), start + 1)
+            result_code = "".join(lines[start:end])
+
+        # Remove any leftover code fence markers or stray triple quotes at end.
+        result_code = result_code.rstrip()
+        if result_code.endswith("'''") or result_code.endswith('\"\"\"'):
+            result_code = result_code[:-3].rstrip()
+        result_code = _ensure_trailing_newline(result_code)
+
+        return {
+            "explanation": plan.explanation,
+            "generated_code": result_code,
+            "warnings": plan.warnings,
+            "suggestions": plan.suggestions,
+        }
+
+    def chat_completion(self, messages: Sequence[Dict[str, str]], context: Optional[Dict[str, Any]] = None) -> str:
+        model = self._build_chat_model()
+        prompt_parts = ["You are an IBM watsonx code assistant."]
+        if context:
+            prompt_parts.append("Context:")
+            for key, value in context.items():
+                prompt_parts.append(f"- {key}: {value}")
+        prompt_parts.append("Messages:")
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            prompt_parts.append(f"{role}: {content}")
+        response = model.invoke("\n".join(prompt_parts))
+        return getattr(response, "content", str(response)).strip()
+
+    def run(self, target_file: str, change_request: str) -> Dict[str, Any]:
+        target_path = Path(target_file)
+        if not target_path.is_absolute():
+            target_path = (self.workspace_root / target_path).resolve()
+
+        if not target_path.exists():
+            raise FileNotFoundError(f"Target file does not exist: {target_path}")
+
+        source_code = target_path.read_text(encoding="utf-8")
+        artifact = self.generate_endpoint_artifacts(
+            target_file=target_path,
+            change_request=change_request,
+        )
+        for file_change in artifact.get("file_changes", []):
+            file_path = Path(file_change["file_path"])
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(file_change["source_after"], encoding="utf-8")
+        artifact["file_path"] = str(target_path)
+        artifact["relative_path"] = str(target_path.relative_to(self.workspace_root)).replace("\\", "/")
+        artifact["source_before"] = source_code
+        return artifact

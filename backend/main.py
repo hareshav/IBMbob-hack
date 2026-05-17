@@ -13,7 +13,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI(title="IBM Bob API Architect Canvas Bridge")
 logger = logging.getLogger(__name__)

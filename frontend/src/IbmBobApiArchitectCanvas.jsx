@@ -548,8 +548,19 @@ export default function IbmBobApiArchitectCanvas({
 
 
   const handleGenerateEndpoint = useCallback((result) => {
-    if (result.success) { setStatus(`Generated: ${result.file_path}`); if (loadedFilePath) loadGraph(); }
-  }, [loadedFilePath, loadGraph]);
+    if (result.success) {
+      setStatus(`✨ Generated endpoint: ${result.relative_path || result.file_path}`);
+      if (result.syntax_errors?.length) {
+        setSyntaxErrors(result.syntax_errors);
+      }
+      if (result.graph) {
+        applyGraphPayload(result.graph, `Generated endpoint in ${result.relative_path || result.file_path} and refreshed graph.`);
+        setLoadedFilePath(result.graph.main_file_path || result.file_path || loadedFilePath);
+      } else if (loadedFilePath) {
+        loadGraph();
+      }
+    }
+  }, [applyGraphPayload, loadedFilePath, loadGraph]);
 
   const handleRefactorFunction = useCallback((result) => {
     if (result.success && result.generated_code) setFunctionCode(result.generated_code);

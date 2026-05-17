@@ -1,4 +1,6 @@
-import { X, Save, AlertCircle, FileCode } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Save, AlertCircle, FileCode, Zap, Wand2, RefreshCw, Check } from 'lucide-react';
+import { computeLineDiff, diffStats } from '../lib/lineDiff';
 
 export default function CodeSidebar({
   selectedTitle,
@@ -6,6 +8,9 @@ export default function CodeSidebar({
   functionCode,
   onFunctionCodeChange,
   onSaveFunction,
+  onSimulateChange,
+  onRefactorRequest,   // async (goal) => { code, explanation } - calls Bob
+  onApplyRefactor,     // (newCode) => void - swap into the editor + save
   onClose,
   isSaving,
   isFunctionNode,
@@ -20,6 +25,82 @@ export default function CodeSidebar({
   const displayName = filePath
     ? filePath.split('/').pop()
     : selectedTitle || 'function';
+
+  /* Refactor flow state - all local to this drawer.
+       phase: 'idle' | 'prompt' | 'running' | 'review'
+       goal:           the user's refactor instruction
+       proposed:       the code Bob proposed (kept separate from the live
+                       editor value so the user can discard cleanly)
+       explanation:    Bob's accompanying note about what changed
+       error:          most recent failure message */
+  const [phase, setPhase] = useState('idle');
+  const [goal, setGoal] = useState('');
+  const [proposed, setProposed] = useState('');
+  const [explanation, setExplanation] = useState('');
+  const [error, setError] = useState('');
+  const goalInputRef = useRef(null);
+
+  /* Reset every time the user switches function. Stops a stale refactor
+     from one function bleeding visually into another. */
+  useEffect(() => {
+    setPhase('idle');
+    setGoal('');
+    setProposed('');
+    setExplanation('');
+    setError('');
+  }, [filePath, selectedTitle]);
+
+  useEffect(() => {
+    if (phase === 'prompt') {
+      const t = setTimeout(() => goalInputRef.current?.focus(), 80);
+      return () => clearTimeout(t);
+    }
+  }, [phase]);
+
+  const diff = useMemo(() => {
+    if (phase !== 'review') return null;
+    return computeLineDiff(functionCode, proposed);
+  }, [phase, functionCode, proposed]);
+  const stats = diff ? diffStats(diff) : null;
+
+  const handleRunRefactor = async () => {
+    if (!goal.trim() || !onRefactorRequest) return;
+    setPhase('running');
+    setError('');
+    try {
+      const result = await onRefactorRequest(goal.trim());
+      const code = result?.code || '';
+      if (!code.trim()) {
+        setError('Bob returned no code. Try a more specific goal.');
+        setPhase('prompt');
+        return;
+      }
+      setProposed(code);
+      setExplanation(result?.explanation || '');
+      setPhase('review');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Refactor failed.');
+      setPhase('prompt');
+    }
+  };
+
+  const handleAcceptRefactor = () => {
+    if (!proposed) return;
+    if (onApplyRefactor) onApplyRefactor(proposed);
+    else if (onFunctionCodeChange) onFunctionCodeChange(proposed);
+    setPhase('idle');
+    setGoal('');
+    setProposed('');
+    setExplanation('');
+  };
+
+  const handleDiscardRefactor = () => {
+    setPhase('idle');
+    setGoal('');
+    setProposed('');
+    setExplanation('');
+    setError('');
+  };
 
   return (
     <aside style={{
@@ -62,6 +143,72 @@ export default function CodeSidebar({
 
         {/* Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {/* Refactor with Bob - opens an inline prompt above the editor.
+              Available in BOTH local and github-URL modes - the refactor
+              call is pure-LLM and never writes to disk by itself. Only the
+              final "Apply changes" step is gated on canEdit (so on a github
+              clone the user can preview Bob's suggestions but can't write
+              them back). Disabled only while a previous proposal is in
+              review or running. */}
+          {isFunctionNode && onRefactorRequest && (
+            <button
+              type="button"
+              onClick={() => setPhase((p) => p === 'idle' ? 'prompt' : p)}
+              disabled={phase === 'review' || phase === 'running'}
+              title={canEdit
+                ? 'Ask IBM Bob to improve this function'
+                : 'Preview Bob\'s suggested changes (read-only workspace)'}
+              style={{
+                height: 26, padding: '0 10px',
+                borderRadius: 5,
+                background: (phase === 'review' || phase === 'running')
+                  ? 'var(--bg-elevated)'
+                  : 'linear-gradient(135deg, #B06EF7 0%, #4F8EF7 100%)',
+                border: 'none',
+                color: (phase === 'review' || phase === 'running') ? 'var(--text-muted)' : '#fff',
+                fontSize: 11, fontWeight: 700,
+                cursor: (phase === 'review' || phase === 'running') ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+                transition: 'all var(--transition-fast)',
+                fontFamily: 'inherit',
+                boxShadow: (phase === 'review' || phase === 'running')
+                  ? 'none'
+                  : '0 2px 10px rgba(176,110,247,0.4), inset 0 1px 0 rgba(255,255,255,0.14)',
+                letterSpacing: '0.01em',
+              }}
+            >
+              <Wand2 size={10} strokeWidth={2.4} />
+              Refactor
+            </button>
+          )}
+
+          {/* Simulate Change - always available for function nodes. Best results
+              after Ask Bob AI has enriched the graph (more context for Bob). */}
+          {isFunctionNode && onSimulateChange && (
+            <button
+              type="button"
+              onClick={onSimulateChange}
+              title="Predict the blast radius of a planned change with IBM Bob"
+              style={{
+                height: 26, padding: '0 10px',
+                borderRadius: 5,
+                background: 'linear-gradient(135deg, #4F8EF7 0%, #2ED8F0 100%)',
+                border: 'none',
+                color: '#fff',
+                fontSize: 11, fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+                transition: 'all var(--transition-fast)',
+                fontFamily: 'inherit',
+                boxShadow: '0 2px 10px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.14)',
+                letterSpacing: '0.01em',
+              }}
+            >
+              <Zap size={10} strokeWidth={2.4} />
+              Simulate
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onSaveFunction}
@@ -80,8 +227,6 @@ export default function CodeSidebar({
               transition: 'all var(--transition-fast)',
               fontFamily: 'inherit',
             }}
-            onMouseEnter={(e) => { if (!saveDisabled) e.currentTarget.style.background = 'var(--accent-blue-hover)'; }}
-            onMouseLeave={(e) => { if (!saveDisabled) e.currentTarget.style.background = 'var(--accent-blue)'; }}
           >
             <Save size={10} />
             {isSaving ? 'Saving…' : 'Save'}
@@ -129,9 +274,127 @@ export default function CodeSidebar({
         </div>
       )}
 
+      {/* ── Refactor prompt strip (above the editor) ── */}
+      {(phase === 'prompt' || phase === 'running') && (
+        <div style={{
+          padding: '10px 14px',
+          background: 'linear-gradient(135deg, rgba(176,110,247,0.08) 0%, rgba(79,142,247,0.05) 100%)',
+          borderBottom: '1px solid rgba(176,110,247,0.25)',
+          flexShrink: 0,
+          animation: 'fadeIn 180ms ease forwards',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+          }}>
+            <Wand2 size={11} color="#B06EF7" strokeWidth={2.4} />
+            <span style={{
+              fontSize: 9, fontWeight: 700, color: '#B06EF7',
+              textTransform: 'uppercase', letterSpacing: '0.12em',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              Refactor with Bob
+            </span>
+            <span style={{ flex: 1 }} />
+            <button
+              onClick={handleDiscardRefactor}
+              disabled={phase === 'running'}
+              style={{
+                background: 'transparent', border: 'none',
+                color: 'var(--text-muted)',
+                fontSize: 10, cursor: phase === 'running' ? 'not-allowed' : 'pointer',
+                opacity: phase === 'running' ? 0.4 : 1,
+                padding: 0, fontFamily: 'inherit',
+              }}
+            >
+              cancel
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              ref={goalInputRef}
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && goal.trim()) handleRunRefactor(); }}
+              disabled={phase === 'running'}
+              placeholder='e.g. "Add input validation" or "Split into smaller functions"'
+              style={{
+                flex: 1, height: 30, padding: '0 10px',
+                background: 'var(--bg-input)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 6,
+                color: 'var(--text-primary)',
+                WebkitTextFillColor: 'var(--text-primary)',
+                fontSize: 11.5,
+                fontFamily: "'JetBrains Mono', monospace",
+                outline: 'none',
+              }}
+              onFocus={(e) => { e.currentTarget.style.borderColor = '#B06EF7'; }}
+              onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border-default)'; }}
+            />
+            <button
+              onClick={handleRunRefactor}
+              disabled={!goal.trim() || phase === 'running'}
+              style={{
+                height: 30, padding: '0 14px',
+                borderRadius: 6,
+                background: (!goal.trim() || phase === 'running')
+                  ? 'var(--bg-elevated)'
+                  : 'linear-gradient(135deg, #B06EF7 0%, #4F8EF7 100%)',
+                color: (!goal.trim() || phase === 'running') ? 'var(--text-muted)' : '#fff',
+                border: 'none',
+                fontSize: 11, fontWeight: 700,
+                cursor: (!goal.trim() || phase === 'running') ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+                fontFamily: 'inherit',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {phase === 'running'
+                ? <><RefreshCw size={11} className="animate-spin" /> Bob writing…</>
+                : <><Wand2 size={11} strokeWidth={2.4} /> Run</>
+              }
+            </button>
+          </div>
+          {error && (
+            <div style={{
+              marginTop: 6, fontSize: 10.5, color: '#F56565',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              {error}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Editor area ── */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {isFunctionNode && hasCode ? (
+        {phase === 'review' && diff ? (
+          /* PR-style line-by-line diff. Replaces the editor while a proposed
+             change is under review. The user picks Apply or Discard below. */
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-base)' }}>
+            {explanation && (
+              <div style={{
+                padding: '10px 14px',
+                background: 'linear-gradient(135deg, rgba(176,110,247,0.08) 0%, rgba(79,142,247,0.05) 100%)',
+                borderBottom: '1px solid rgba(176,110,247,0.25)',
+                fontSize: 11.5, color: 'var(--text-secondary)',
+                lineHeight: 1.5,
+              }}>
+                <span style={{
+                  display: 'inline-block',
+                  fontSize: 8.5, fontWeight: 700, color: '#B06EF7',
+                  textTransform: 'uppercase', letterSpacing: '0.12em',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  marginRight: 8,
+                }}>
+                  Bob:
+                </span>
+                {explanation}
+              </div>
+            )}
+            <DiffPane diff={diff} />
+          </div>
+        ) : isFunctionNode && hasCode ? (
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
             {/* Line numbers gutter */}
             <div style={{
@@ -205,6 +468,78 @@ export default function CodeSidebar({
         )}
       </div>
 
+      {/* ── Review footer (Apply / Discard) ──
+           In github-URL (read-only) mode the diff is preview-only: Apply is
+           disabled and we show an inline note explaining why. The user can
+           still inspect the diff and use Discard to clear it. */}
+      {phase === 'review' && diff && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px',
+          background: 'var(--bg-card)',
+          borderTop: '1px solid var(--border-subtle)',
+          flexShrink: 0,
+        }}>
+          <span style={{
+            fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            <span style={{ color: '#1AE0A0', fontWeight: 700 }}>+{stats.added}</span>
+            {'  '}
+            <span style={{ color: '#F56565', fontWeight: 700 }}>-{stats.removed}</span>
+          </span>
+          {!canEdit && (
+            <span style={{
+              fontSize: 10, color: 'var(--text-muted)',
+              fontStyle: 'italic',
+              fontFamily: 'inherit',
+            }}>
+              Preview only - this workspace is read-only.
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={handleDiscardRefactor}
+            style={{
+              height: 28, padding: '0 12px',
+              borderRadius: 6,
+              background: 'transparent',
+              border: '1px solid var(--border-default)',
+              color: 'var(--text-secondary)',
+              fontSize: 11, fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-elevated)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+          >
+            {canEdit ? 'Discard' : 'Close preview'}
+          </button>
+          <button
+            onClick={handleAcceptRefactor}
+            disabled={!canEdit}
+            title={!canEdit ? 'Apply not available for GitHub URLs - load a local path to write changes' : 'Save the refactored code to disk'}
+            style={{
+              height: 28, padding: '0 14px',
+              borderRadius: 6,
+              background: canEdit
+                ? 'linear-gradient(135deg, #1AE0A0 0%, #2ED8F0 100%)'
+                : 'var(--bg-elevated)',
+              border: canEdit ? 'none' : '1px solid var(--border-subtle)',
+              color: canEdit ? '#0a0a12' : 'var(--text-muted)',
+              fontSize: 11, fontWeight: 700,
+              cursor: canEdit ? 'pointer' : 'not-allowed',
+              opacity: canEdit ? 1 : 0.5,
+              display: 'flex', alignItems: 'center', gap: 5,
+              fontFamily: 'inherit',
+              boxShadow: canEdit ? '0 2px 10px rgba(26,224,160,0.35), inset 0 1px 0 rgba(255,255,255,0.18)' : 'none',
+            }}
+          >
+            <Check size={11} strokeWidth={2.6} />
+            Apply changes
+          </button>
+        </div>
+      )}
+
       {/* ── Status bar ── */}
       <div style={{
         height: 26,
@@ -266,5 +601,82 @@ export default function CodeSidebar({
         </div>
       )}
     </aside>
+  );
+}
+
+/* ── Diff renderer - GitHub-PR-style unified diff ── */
+function DiffPane({ diff }) {
+  /* Color palette tuned for both themes; rely on inline rgba so we don't have to
+     add CSS variables. Background tints stay subtle so syntax stays readable. */
+  const colorFor = (type) => {
+    if (type === 'add')    return { bg: 'rgba(26,224,160,0.10)',  marker: '#1AE0A0', text: 'var(--text-primary)' };
+    if (type === 'remove') return { bg: 'rgba(245,101,101,0.10)', marker: '#F56565', text: 'var(--text-primary)' };
+    return                       { bg: 'transparent',             marker: 'var(--text-muted)', text: 'var(--text-secondary)' };
+  };
+
+  return (
+    <div style={{
+      flex: 1, overflowY: 'auto',
+      fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+      fontSize: 12, lineHeight: '20px',
+    }}>
+      {diff.map((row, idx) => {
+        const c = colorFor(row.type);
+        const marker = row.type === 'add' ? '+' : row.type === 'remove' ? '-' : ' ';
+        return (
+          <div
+            key={idx}
+            style={{
+              display: 'flex', alignItems: 'stretch',
+              background: c.bg,
+              minHeight: 20,
+            }}
+          >
+            <div style={{
+              width: 36, flexShrink: 0,
+              textAlign: 'right',
+              padding: '0 6px 0 0',
+              color: 'var(--text-muted)',
+              background: row.type === 'equal' ? 'var(--bg-card)' : 'transparent',
+              borderRight: '1px solid var(--border-subtle)',
+              userSelect: 'none',
+              fontSize: 10.5,
+            }}>
+              {row.oldNo ?? ''}
+            </div>
+            <div style={{
+              width: 36, flexShrink: 0,
+              textAlign: 'right',
+              padding: '0 6px 0 0',
+              color: 'var(--text-muted)',
+              background: row.type === 'equal' ? 'var(--bg-card)' : 'transparent',
+              borderRight: '1px solid var(--border-subtle)',
+              userSelect: 'none',
+              fontSize: 10.5,
+            }}>
+              {row.newNo ?? ''}
+            </div>
+            <div style={{
+              width: 18, flexShrink: 0,
+              textAlign: 'center',
+              color: c.marker,
+              fontWeight: 700,
+              userSelect: 'none',
+            }}>
+              {marker}
+            </div>
+            <pre style={{
+              flex: 1, margin: 0,
+              padding: '0 10px',
+              color: c.text,
+              whiteSpace: 'pre',
+              overflowX: 'auto',
+            }}>
+              {row.text || ' '}
+            </pre>
+          </div>
+        );
+      })}
+    </div>
   );
 }

@@ -11,7 +11,7 @@ import Logo from './Logo';
 export default function WorkspaceNavbar({
   onBack, mode, theme, onToggleTheme,
   mainFilePath, onMainFilePathChange,
-  onLoadGraph, onLoadAIGraph, isLoading, loadingSource, loadedFilePath,
+  onLoadGraph, onLoadAIGraph, isLoading, loadingSource, hasGraph, bobModeActive, loadedFilePath,
   availableModels, selectedModelId, onSelectedModelIdChange,
   isLoadingModels,
   onOpenChatbot, onOpenGenerateEndpoint,
@@ -40,6 +40,9 @@ export default function WorkspaceNavbar({
   }
 
   const parseDisabled = isLoading || !hasPath || Boolean(pathError);
+  /* Ask Bob AI now enriches the EXISTING graph (no separate load). Requires
+     a parsed graph to be present. Always disabled while any load is running. */
+  const askBobDisabled = isLoading || !hasGraph;
   /* Per-button spinner state: only the button that was clicked shows its loader.
      The other one is greyed-disabled but keeps its idle label. */
   const isParseLoading = loadingSource === 'parse';
@@ -207,41 +210,57 @@ export default function WorkspaceNavbar({
           }
         </button>
 
-        {/* Ask Bob AI button */}
+        {/* Ask Bob AI button - enriches the EXISTING parsed graph with IBM Bob
+            (semantic risk scoring + hover glow + Simulate Change). Disabled
+            until Parse has loaded a graph. Visually upgrades to "Bob Active"
+            once the enrichment has completed. */}
         <button
           onClick={onLoadAIGraph}
-          disabled={parseDisabled}
-          title={!hasPath
-            ? 'Type a local file path or GitHub URL first'
-            : 'Let IBM Bob AI analyse the codebase and build the graph semantically'}
+          disabled={askBobDisabled}
+          title={
+            askBobDisabled && !hasGraph ? 'Run Parse first - Bob enriches an already-loaded graph'
+            : bobModeActive ? 'Re-run Bob analysis on the current graph'
+            : 'Activate IBM Bob: semantic risk, hover glow, and Simulate Change'
+          }
           style={{
             height: 34, padding: '0 16px',
             borderRadius: 8,
-            background: parseDisabled
+            background: askBobDisabled
               ? 'var(--bg-elevated)'
-              : 'linear-gradient(135deg, #1AE0A0 0%, #2ED8F0 100%)',
-            color: parseDisabled ? 'var(--text-muted)' : '#0a0a12',
+              : bobModeActive
+                ? 'linear-gradient(135deg, #4F8EF7 0%, #B06EF7 100%)'
+                : 'linear-gradient(135deg, #1AE0A0 0%, #2ED8F0 100%)',
+            color: askBobDisabled ? 'var(--text-muted)' : bobModeActive ? '#fff' : '#0a0a12',
             border: 'none',
             fontSize: 12.5, fontWeight: 700,
-            cursor: parseDisabled ? 'not-allowed' : 'pointer',
+            cursor: askBobDisabled ? 'not-allowed' : 'pointer',
             flexShrink: 0,
             display: 'flex', alignItems: 'center', gap: 6,
             transition: 'all 150ms ease',
-            opacity: parseDisabled ? 0.45 : 1,
+            opacity: askBobDisabled ? 0.45 : 1,
             whiteSpace: 'nowrap',
             letterSpacing: '0.01em',
             fontFamily: "'JetBrains Mono', monospace",
-            boxShadow: parseDisabled ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+            boxShadow: askBobDisabled
+              ? 'none'
+              : bobModeActive
+                ? '0 2px 14px rgba(124,127,245,0.45), inset 0 1px 0 rgba(255,255,255,0.18)'
+                : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
           }}
           onMouseEnter={(e) => {
-            if (!parseDisabled) {
-              e.currentTarget.style.transform = 'translateY(-1px)';
-              e.currentTarget.style.boxShadow = '0 5px 22px rgba(26,224,160,0.55), inset 0 1px 0 rgba(255,255,255,0.22)';
-            }
+            if (askBobDisabled) return;
+            e.currentTarget.style.transform = 'translateY(-1px)';
+            e.currentTarget.style.boxShadow = bobModeActive
+              ? '0 5px 22px rgba(124,127,245,0.6), inset 0 1px 0 rgba(255,255,255,0.22)'
+              : '0 5px 22px rgba(26,224,160,0.55), inset 0 1px 0 rgba(255,255,255,0.22)';
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = 'none';
-            e.currentTarget.style.boxShadow = parseDisabled ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            e.currentTarget.style.boxShadow = askBobDisabled
+              ? 'none'
+              : bobModeActive
+                ? '0 2px 14px rgba(124,127,245,0.45), inset 0 1px 0 rgba(255,255,255,0.18)'
+                : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
           }}
         >
           {isAILoading
@@ -250,7 +269,7 @@ export default function WorkspaceNavbar({
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
                 </svg>
-                Ask Bob AI
+                {bobModeActive ? 'Bob Active' : 'Ask Bob AI'}
               </>
           }
         </button>

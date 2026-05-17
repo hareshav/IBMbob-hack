@@ -1,7 +1,8 @@
-import { useState, useEffect, memo, useContext } from 'react';
+import { useState, useEffect, memo, useContext, useRef } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { ChevronDown, Layers, FileCode2, ArrowRight, AlertTriangle } from 'lucide-react';
 import { GraphCtx } from '../lib/graphContext';
+import RiskHoverDialog from './RiskHoverDialog';
 
 const KIND = {
   router: {
@@ -63,8 +64,29 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
   const [hovered, setHovered] = useState(false);
   const [burstKey, setBurstKey] = useState(0);
   const [showBurst, setShowBurst] = useState(false);
-  const { connectedNodeIds, hasSelection } = useContext(GraphCtx);
+
+  /* Risk-hover popover: rect of the node so the portal-rendered RiskHoverDialog
+     knows where to anchor. Only populated for function nodes after a short delay
+     so quick mouse passes don't pop the dialog. */
+  const wrapperRef = useRef(null);
+  const hoverTimerRef = useRef(null);
+  const [riskAnchorRect, setRiskAnchorRect] = useState(null);
+  const {
+    connectedNodeIds,
+    hasSelection,
+    hoveredNodeId,
+    hoverConnectedNodeIds,
+    bobModeActive,
+  } = useContext(GraphCtx);
   const isConnected = !selected && connectedNodeIds.has(id);
+
+  /* MIRE-style hover state (Bob mode only). The hovered node itself uses a
+     stronger focus glow; its neighbours get the calm active glow. Everything
+     unrelated dims out to make the live circuit obvious. */
+  const isHoverFocus = bobModeActive && hoveredNodeId === id;
+  const isHoverNear  = bobModeActive && !isHoverFocus && hoverConnectedNodeIds.has(id);
+  const isHoverActive = isHoverFocus || isHoverNear;
+  const hasHover = bobModeActive && hoveredNodeId !== null;
 
   /* ── External-module stub (boundary marker in expanded view) ── */
   if (data?.kind === 'external') {
@@ -336,30 +358,87 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
     return () => clearTimeout(t);
   }, [selected]);
 
+  /* Clean up any pending hover timer if this node unmounts mid-hover */
+  useEffect(() => () => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+  }, []);
+
+  /* Hover-to-show risk popover, with a short delay so it doesn't fire on
+     pass-through mouse movement. Only meaningful for function nodes. */
+  const isFunctionNode = data?.kind === 'function';
+  const handleMouseEnter = () => {
+    setHovered(true);
+    if (!isFunctionNode) return;
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => {
+      if (wrapperRef.current) {
+        setRiskAnchorRect(wrapperRef.current.getBoundingClientRect());
+      }
+    }, 320);
+  };
+  const handleMouseLeave = () => {
+    setHovered(false);
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    setRiskAnchorRect(null);
+  };
+
   const kind      = data?.kind  || 'default';
   const cfg       = KIND[kind]  || KIND.default;
   const group     = data?.group || null;
   const groupColor = group ? (GROUP_COLORS[group] || '#7C7F9A') : null;
-  const risk      = data?.risk  ?? null;
-  const fanIn     = data?.fan_in  ?? null;
-  const fanOut    = data?.fan_out ?? null;
-  const isRisky   = data?.state === 'risky';
+  const risk            = data?.risk  ?? null;
+  const riskDescription = data?.risk_description || '';
+  const fanIn           = data?.fan_in  ?? null;
+  const fanOut          = data?.fan_out ?? null;
+  const isRisky         = data?.state === 'risky';
+
+  /* Simulate Change states - temporary, only set during a running simulation.
+     Take precedence over the connected-neighbour glow so the impact wave is
+     unmistakable on a busy graph. */
+  const simState  = data?.state === 'epicenter' ? 'epicenter'
+                  : data?.state === 'unstable'  ? 'unstable'
+                  : data?.state === 'simulated' ? 'simulated'
+                  : null;
+  const isSimulated = simState !== null;
+
+  /* Human-readable severity label, used only when Bob has actually scored the
+     risk (we have a description) - keeps the AST-only view from looking
+     misleadingly opinionated. */
+  const severity =
+    risk === null ? null :
+    risk > 0.75 ? { label: 'Critical', color: '#F56565' } :
+    risk > 0.55 ? { label: 'High',     color: '#F56565' } :
+    risk > 0.3  ? { label: 'Moderate', color: '#F7B955' } :
+                  { label: 'Low',      color: '#1AE0A0' };
 
   const hasTarget = kind !== 'input';
   const hasSource = kind !== 'output';
 
-  const borderColor = isConnected && !selected
-    ? 'rgba(79,142,247,0.55)'
+  /* MIRE active border = its #4a6fa5. Used for hover-focus + hover-near in Bob mode. */
+  const borderColor =
+    simState === 'epicenter' || simState === 'unstable'
+      ? 'rgba(245,101,101,0.95)'
+    : simState === 'simulated'
+      ? 'rgba(176,110,247,0.75)'
+    : isHoverFocus
+      ? 'rgba(124,156,210,1)'
+    : isHoverNear
+      ? 'rgba(74,111,165,0.85)'
+    : isConnected && !selected
+      ? 'rgba(79,142,247,0.55)'
     : selected
       ? `${cfg.color}BB`
-      : hovered
-        ? `${cfg.color}55`
-        : isRisky
-          ? 'rgba(245,101,101,0.28)'
-          : 'rgba(255,255,255,0.07)';
+    : hovered
+      ? `${cfg.color}55`
+    : isRisky
+      ? 'rgba(245,101,101,0.28)'
+      : 'rgba(255,255,255,0.07)';
 
-  /* when connected (not selected), let CSS @keyframes handle box-shadow */
-  const boxShadow = (isConnected && !selected)
+  /* When sim, hover-active, OR connected: CSS @keyframes drives the box-shadow. */
+  const boxShadow = isSimulated || isHoverActive || (isConnected && !selected)
     ? undefined
     : selected
       ? shadow.selected
@@ -367,15 +446,41 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
         ? shadow.risky
         : hovered ? shadow.hovered : shadow.base;
 
+  /* Pick the active CSS animation class. Priority:
+       1. Simulation states (red/violet wave)
+       2. Bob-mode hover focus / near
+       3. Click-selection connected glitter
+     The old gradient `node-connected-glow` only fires when Bob mode is OFF,
+     so the click-glow style follows whichever mode the user is in. */
+  const animationClass =
+    simState === 'epicenter' ? 'sim-epicenter' :
+    simState === 'unstable'  ? 'sim-unstable'  :
+    simState === 'simulated' ? 'sim-simulated' :
+    isHoverFocus              ? 'mire-focus-glow' :
+    isHoverNear               ? 'mire-active-glow' :
+    (isConnected && !bobModeActive) ? 'node-connected-glow' :
+    (isConnected && bobModeActive)  ? 'mire-active-glow' :
+                                undefined;
+
   const label    = data.title || data.label || 'Unnamed';
   const fileLabel = data.file ? data.file.split('/').slice(-1)[0] : null;
-  const isDimmed  = hasSelection && !selected && !isConnected;
+  /* Dimming rules - layered so each interaction mode has a clean "off" backdrop:
+       - During simulation: only sim-tagged nodes stay bright
+       - When Bob hover is live: only the focal + 1-hop neighbours stay bright
+       - When something is selected: only selection + its neighbourhood stay bright
+       - Otherwise: nothing is dimmed */
+  const isDimmed =
+    isSimulated ? false :
+    hasHover    ? !(isHoverFocus || isHoverNear) :
+    hasSelection ? !(selected || isConnected) :
+                   false;
 
   return (
     <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className={isConnected ? 'node-connected-glow' : undefined}
+      ref={wrapperRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={animationClass}
       style={{
         position: 'relative',
         minWidth: 200,
@@ -505,30 +610,76 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
       {/* Fan-in / fan-out + risk bar: only for function nodes with data */}
       {kind === 'function' && (fanIn !== null || risk !== null) && (
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 8,
           marginTop: 6, paddingTop: 5,
           borderTop: '1px solid var(--border-subtle)',
         }}>
-          {fanIn !== null && (
-            <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
-              <span style={{ color: '#2ED8F0' }}>↓{fanIn}</span>
-              {' '}
-              <span style={{ color: '#B06EF7' }}>↑{fanOut ?? 0}</span>
-            </span>
-          )}
-          {risk !== null && (
-            <div style={{ flex: 1, height: 3, background: 'var(--border-subtle)', borderRadius: 100, overflow: 'hidden' }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.round(risk * 100)}%`,
-                borderRadius: 100,
-                background: risk > 0.6
-                  ? '#F56565'
-                  : risk > 0.25
-                    ? '#F7B955'
-                    : '#1AE0A0',
-                transition: 'width 400ms ease',
-              }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {fanIn !== null && (
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+                <span style={{ color: '#2ED8F0' }}>↓{fanIn}</span>
+                {' '}
+                <span style={{ color: '#B06EF7' }}>↑{fanOut ?? 0}</span>
+              </span>
+            )}
+            {risk !== null && (
+              <div style={{ flex: 1, height: 3, background: 'var(--border-subtle)', borderRadius: 100, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%',
+                  width: `${Math.round(risk * 100)}%`,
+                  borderRadius: 100,
+                  background: risk > 0.6
+                    ? '#F56565'
+                    : risk > 0.25
+                      ? '#F7B955'
+                      : '#1AE0A0',
+                  transition: 'width 400ms ease',
+                }} />
+              </div>
+            )}
+            {severity && (
+              <span style={{
+                fontSize: 8, fontWeight: 700,
+                color: severity.color,
+                fontFamily: "'JetBrains Mono', monospace",
+                textTransform: 'uppercase', letterSpacing: '0.06em',
+                flexShrink: 0,
+              }}>
+                {severity.label}
+              </span>
+            )}
+          </div>
+
+          {/* Bob's one-line "why is this risky" caption. Only appears once Ask
+              Bob AI has scored this node; absent on AST-only loads. */}
+          {riskDescription && (
+            <div style={{
+              marginTop: 4,
+              fontSize: 9.5,
+              color: 'var(--text-muted)',
+              fontStyle: 'italic',
+              lineHeight: 1.35,
+              display: 'flex', alignItems: 'flex-start', gap: 4,
+            }}>
+              <span style={{
+                color: '#7C7FF5',
+                fontWeight: 700,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontStyle: 'normal',
+                fontSize: 8.5,
+                lineHeight: 1.5,
+                flexShrink: 0,
+              }}>
+                BOB
+              </span>
+              <span style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
+              }}>
+                {riskDescription}
+              </span>
             </div>
           )}
         </div>
@@ -544,6 +695,13 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
         <Handle type="source" position={Position.Right} isConnectable={isConnectable}
           style={{ width: 8, height: 8, background: cfg.handleColor,
                    border: '2px solid var(--bg-card)', borderRadius: '50%', right: -4 }} />
+      )}
+
+      {/* Portal-rendered popover that explains why this function is risky.
+          Only opens after a short hover delay, and only for function nodes
+          (routers / inputs / outputs don't carry risk semantics). */}
+      {isFunctionNode && (
+        <RiskHoverDialog anchorRect={riskAnchorRect} data={data} />
       )}
     </div>
   );

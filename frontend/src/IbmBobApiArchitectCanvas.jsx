@@ -20,7 +20,10 @@ import CanvasSearch from './components/CanvasSearch';
 import CanvasLegend from './components/CanvasLegend';
 import GroupsPanel from './components/GroupsPanel';
 import { fetchModelCatalog, loadMainFileGraph, saveFunctionContent, requestAIGraph,
-         deleteFunctionFromSource, createRouterFile } from './lib/apiClient';
+         deleteFunctionFromSource, createRouterFile, scoreRiskWithBob,
+         simulateChangeWithBob, requestFunctionRefactor,
+         requestFunctionRefactorPreview } from './lib/apiClient';
+import SimulateChangeModal from './components/SimulateChangeModal';
 import { GraphCtx } from './lib/graphContext';
 import { applyDagreLayout } from './lib/dagreLayout';
 import { collapseGroups, distinctGroups, isSupernodeId } from './lib/groupCollapse';
@@ -37,6 +40,9 @@ const FALLBACK_MODELS = [
 /* ── Custom node/edge types: defined outside component so refs are stable ── */
 const NODE_TYPES = { api: ApiNode };
 const EDGE_TYPES = { flow: FlowEdge };
+
+/* Stable empty Set so hover-reset doesn't churn the GraphCtx identity each frame */
+const EMPTY_SET = new Set();
 
 /* ── Edge type → color (kept in sync with FlowEdge's EDGE_CFG) ── */
 const EDGE_COLOR = { api: '#2ED8F0', call: '#7C7FF5', default: '#4F8EF7' };
@@ -365,9 +371,20 @@ export default function IbmBobApiArchitectCanvas({
   const [activeFunctionId, setActiveFunctionId] = useState('');
   const [syntaxErrors, setSyntaxErrors]       = useState([]);
   /* Tracks WHICH engine is loading so only the clicked button spins.
-     null = idle. 'parse' = AST parser. 'ai' = watsonx. */
+     null = idle. 'parse' = AST parser. 'ai' = watsonx enrichment. */
   const [loadingSource, setLoadingSource] = useState(null);
   const isLoadingGraph = Boolean(loadingSource);
+
+  /* Bob mode: when true, the graph has been enriched by IBM Bob.
+     Activates: MIRE-style hover-glow (calm blue, breathing), the Simulate
+     Change action on function nodes, and the risk descriptions on cards.
+     Resets every time Parse loads a fresh graph. */
+  const [bobModeActive, setBobModeActive] = useState(false);
+
+  /* Hover state - only meaningful when bobModeActive is true. Drives the
+     hover-based neighbourhood glow that mirrors MIRE's `onNodeHover`. */
+  const [hoveredNodeId, setHoveredNodeId] = useState(null);
+  const [hoverConnectedNodeIds, setHoverConnectedNodeIds] = useState(() => new Set());
   const [isSaving, setIsSaving]               = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [isNodeChatOpen, setIsNodeChatOpen]   = useState(false);
@@ -379,6 +396,17 @@ export default function IbmBobApiArchitectCanvas({
   const [isChatbotOpen,          setIsChatbotOpen]          = useState(false);
   const [isGenerateEndpointOpen, setIsGenerateEndpointOpen] = useState(false);
   const [isRefactorFunctionOpen, setIsRefactorFunctionOpen] = useState(false);
+
+  /* Simulate Change: modal state + the resulting blast-radius animation.
+     simulationOverlayIds tracks which nodes currently have a temporary sim
+     `state` patched onto them so we can revert cleanly when the modal closes
+     or the user starts a new simulation. simulationTimers stores pending
+     setTimeout handles so we can cancel mid-wave if the user reruns. */
+  const [isSimulateChangeOpen, setIsSimulateChangeOpen] = useState(false);
+  const [isSimulating,         setIsSimulating]         = useState(false);
+  const [simulationResult,     setSimulationResult]     = useState(null);
+  const simulationTimers = useRef([]);
+  const simulationOverlayIdsRef = useRef(new Set());
 
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModelId, setSelectedModelId] = useState('');
@@ -661,6 +689,12 @@ export default function IbmBobApiArchitectCanvas({
     const path = mainFilePath.trim();
     if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
     setLoadingSource('parse'); setStatus('Analyzing…');
+    /* Fresh graph = fresh Bob context. Drop any prior enrichment state so
+       hover-glow and Simulate don't appear active until the user re-runs
+       Ask Bob AI on this new graph. */
+    setBobModeActive(false);
+    setHoveredNodeId(null);
+    setHoverConnectedNodeIds(new Set());
     try {
       const payload = await loadMainFileGraph(path);
       const label = payload.source_label || payload.main_file_path || path;
@@ -673,24 +707,286 @@ export default function IbmBobApiArchitectCanvas({
     } finally { setLoadingSource(null); }
   }, [applyGraphPayload, mainFilePath]);
 
-  /* ── Load graph (IBM Bob AI semantic analysis) ── */
-  const loadAIGraph = useCallback(async () => {
-    const path = mainFilePath.trim();
-    if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
-    setLoadingSource('ai');
-    setStatus('IBM Bob AI is reading your codebase…');
+  /* ── Re-score risk via watsonx for the currently-loaded function nodes.
+     Runs after Ask Bob AI (or can be invoked manually). Patches
+     rawNodesRef in place and recomputes display so every visible node
+     picks up the new risk + caption without losing any view state. ── */
+  const enrichRiskWithBob = useCallback(async () => {
+    const raw = rawNodesRef.current || [];
+    const fnNodes = raw.filter((n) => n.data?.kind === 'function');
+    if (fnNodes.length === 0) return;
+
+    setStatus(`Bob is scoring risk on ${fnNodes.length} function${fnNodes.length === 1 ? '' : 's'}…`);
+
+    const summary = fnNodes.map((n, i) => ({
+      idx: i,
+      label: n.data?.label || n.data?.title || n.id,
+      file: n.data?.file || '',
+      group: n.data?.group || 'utils',
+      fan_in: Math.max(0, Number(n.data?.fan_in) || 0),
+      fan_out: Math.max(0, Number(n.data?.fan_out) || 0),
+      risk: Math.max(0, Math.min(1, Number(n.data?.risk) || 0)),
+    }));
+
+    let scores;
     try {
-      const payload = await requestAIGraph(path, selectedModelId);
-      applyGraphPayload(payload, `AI graph: ${payload.nodes?.length || 0} components`);
-      setLoadedFilePath(payload.workspace_path || path);
-      setWorkspacePath(payload.workspace_path || '');
-      setSyntaxErrors([]);
-      if (payload.summary) setStatus(`AI: ${payload.summary}`);
-      pendingFitView.current = true;
+      const result = await scoreRiskWithBob(summary, selectedModelId);
+      scores = result?.scores || [];
     } catch (err) {
-      setStatus(`AI Error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
-    } finally { setLoadingSource(null); }
-  }, [applyGraphPayload, mainFilePath, selectedModelId]);
+      setStatus(`Risk scoring skipped: ${err instanceof Error ? err.message : 'error'}`);
+      return;
+    }
+
+    if (scores.length === 0) {
+      setStatus('Bob returned no risk scores. Graph unchanged.');
+      return;
+    }
+
+    /* Patch rawNodesRef so collapse / expand / view-mode changes preserve the
+       new risk + description. Match by idx into the same fnNodes order we sent. */
+    const idToPatch = new Map();
+    for (const s of scores) {
+      const node = fnNodes[s.idx];
+      if (!node) continue;
+      idToPatch.set(node.id, { risk: s.risk, description: (s.description || '').trim() });
+    }
+
+    rawNodesRef.current = raw.map((n) => {
+      const patch = idToPatch.get(n.id);
+      if (!patch) return n;
+      const nextRisk = patch.risk;
+      const nextState = nextRisk > 0.55 ? 'risky' : nextRisk > 0.3 ? 'active' : 'calm';
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          risk: nextRisk,
+          risk_description: patch.description,
+          state: nextState,
+        },
+      };
+    });
+
+    recomputeDisplay();
+    setStatus(`Bob scored ${idToPatch.size} of ${fnNodes.length} functions.`);
+  }, [recomputeDisplay, selectedModelId]);
+
+  /* ── Simulate Change: patch a transient `state` onto a set of nodes in
+       both rawNodesRef and the displayed nodes, then schedule reverts so
+       the wave animation reads as a temporary impact, not a permanent change.
+
+       We deliberately mutate the displayed nodes (setNodes) WITHOUT a full
+       recompute so dagre doesn't re-lay anything mid-animation. The raw
+       refs are patched in parallel so view-mode swaps after the simulation
+       still know where to revert to. */
+  const patchSimStates = useCallback((overrides) => {
+    /* overrides: Map<id, 'epicenter' | 'simulated' | 'unstable' | null>
+       null = revert (drop the override). */
+    if (!overrides || overrides.size === 0) return;
+
+    const seen = new Set();
+    rawNodesRef.current = (rawNodesRef.current || []).map((n) => {
+      if (!overrides.has(n.id)) return n;
+      seen.add(n.id);
+      const next = overrides.get(n.id);
+      const baseState = n.data?._baseState ?? n.data?.state ?? 'calm';
+      if (next === null) {
+        const { _baseState, ...restData } = n.data || {};
+        return { ...n, data: { ...restData, state: baseState } };
+      }
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          state: next,
+          _baseState: n.data?._baseState ?? n.data?.state ?? 'calm',
+        },
+      };
+    });
+
+    setNodes((cur) => cur.map((n) => {
+      if (!overrides.has(n.id)) return n;
+      const next = overrides.get(n.id);
+      const baseState = n.data?._baseState ?? n.data?.state ?? 'calm';
+      if (next === null) {
+        const { _baseState, ...restData } = n.data || {};
+        return { ...n, data: { ...restData, state: baseState } };
+      }
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          state: next,
+          _baseState: n.data?._baseState ?? n.data?.state ?? 'calm',
+        },
+      };
+    }));
+
+    /* Track which ids currently carry a sim override so revertSimStates
+       knows what to clean up later. */
+    if (overrides.size > 0) {
+      const live = simulationOverlayIdsRef.current;
+      for (const [id, val] of overrides.entries()) {
+        if (val === null) live.delete(id);
+        else live.add(id);
+      }
+    }
+  }, [setNodes]);
+
+  const cancelSimulationTimers = useCallback(() => {
+    simulationTimers.current.forEach(clearTimeout);
+    simulationTimers.current = [];
+  }, []);
+
+  const revertSimStates = useCallback(() => {
+    const ids = simulationOverlayIdsRef.current;
+    if (ids.size === 0) return;
+    const reverts = new Map();
+    for (const id of ids) reverts.set(id, null);
+    patchSimStates(reverts);
+    simulationOverlayIdsRef.current = new Set();
+  }, [patchSimStates]);
+
+  /* Drive a 3-wave propagation that visualises a blast radius:
+       wave 0 (0ms)   - epicenter node flares
+       wave 1 (180ms) - high-impact affected nodes go unstable, rest 'simulated'
+       wave 2 (420ms) - everything in the impact set settles to its final state
+       wave 3 (auto)  - states persist until the user closes the modal */
+  const runImpactPropagation = useCallback((epicenterId, affectedIds, riskDeltaById) => {
+    cancelSimulationTimers();
+    revertSimStates();
+
+    /* Wave 0: epicenter immediately */
+    const w0 = new Map();
+    w0.set(epicenterId, 'epicenter');
+    patchSimStates(w0);
+
+    /* Wave 1: peripheral nodes initially flicker unstable if heavy, simulated otherwise */
+    const t1 = setTimeout(() => {
+      const w1 = new Map();
+      for (const id of affectedIds) {
+        if (id === epicenterId) continue;
+        const delta = riskDeltaById[id] ?? 0;
+        w1.set(id, delta > 0.25 ? 'unstable' : 'simulated');
+      }
+      patchSimStates(w1);
+    }, 180);
+
+    /* Wave 2: settle - unstable nodes that aren't above the high-impact bar
+       drop back to simulated. Final state persists until close. */
+    const t2 = setTimeout(() => {
+      const w2 = new Map();
+      for (const id of affectedIds) {
+        if (id === epicenterId) continue;
+        const delta = riskDeltaById[id] ?? 0;
+        w2.set(id, delta > 0.5 ? 'unstable' : 'simulated');
+      }
+      patchSimStates(w2);
+    }, 900);
+
+    simulationTimers.current = [t1, t2];
+  }, [cancelSimulationTimers, patchSimStates, revertSimStates]);
+
+  const runSimulation = useCallback(async (description) => {
+    if (!selectedNode?.id || !description) return;
+    const epicenter = selectedNode;
+    const epicenterId = epicenter.id;
+
+    /* Build a 1-hop connected node summary for Bob's context. We use the
+       displayed nodes (not raw) so the simulation respects whichever view
+       the user is currently in - modules overview, expanded, collapsed. */
+    const neighbourIds = new Set();
+    edges.forEach((e) => {
+      if (e.source === epicenterId) neighbourIds.add(e.target);
+      if (e.target === epicenterId) neighbourIds.add(e.source);
+    });
+    const connectedSummary = nodes
+      .filter((n) => neighbourIds.has(n.id))
+      .map((n) => ({
+        label: n.data?.label || n.data?.title || n.id,
+        group: n.data?.group || 'utils',
+        file:  n.data?.file  || '',
+      }));
+
+    setIsSimulating(true);
+    setSimulationResult(null);
+    setStatus(`Bob is tracing the blast radius of "${epicenter.data?.title || epicenter.id}"…`);
+
+    try {
+      const result = await simulateChangeWithBob({
+        nodeLabel: epicenter.data?.label || epicenter.data?.title || epicenter.id,
+        file: epicenter.data?.file || '',
+        description,
+        connectedNodes: connectedSummary,
+        modelId: selectedModelId,
+      });
+
+      /* Map Bob's affected labels back to node ids. Search in the displayed
+         neighbourhood first (more likely to be unique), then fall back to
+         a graph-wide search. */
+      const labelToId = new Map();
+      for (const n of nodes) {
+        const lbl = n.data?.label || n.data?.title;
+        if (lbl && !labelToId.has(lbl)) labelToId.set(lbl, n.id);
+      }
+
+      const affectedIds = new Set([epicenterId]);
+      for (const label of result.affectedLabels || []) {
+        const id = labelToId.get(label);
+        if (id) affectedIds.add(id);
+      }
+
+      const riskDeltaById = {};
+      if (result.riskDelta && typeof result.riskDelta === 'object') {
+        for (const [label, delta] of Object.entries(result.riskDelta)) {
+          const id = labelToId.get(label);
+          if (id) riskDeltaById[id] = Number(delta) || 0;
+        }
+      }
+
+      setSimulationResult(result);
+      runImpactPropagation(epicenterId, affectedIds, riskDeltaById);
+      setStatus(`Bob traced ${affectedIds.size - 1} downstream impact${affectedIds.size === 2 ? '' : 's'}.`);
+    } catch (err) {
+      setStatus(`Simulation failed: ${err instanceof Error ? err.message : 'error'}`);
+    } finally {
+      setIsSimulating(false);
+    }
+  }, [edges, nodes, runImpactPropagation, selectedModelId, selectedNode]);
+
+  const closeSimulateChangeModal = useCallback(() => {
+    setIsSimulateChangeOpen(false);
+    setSimulationResult(null);
+    cancelSimulationTimers();
+    revertSimStates();
+  }, [cancelSimulationTimers, revertSimStates]);
+
+  /* Tear down any pending wave timers on unmount */
+  useEffect(() => () => cancelSimulationTimers(), [cancelSimulationTimers]);
+
+  /* ── Ask Bob AI: enrich the EXISTING parsed graph with IBM Bob features.
+     This used to load a separate AI-built graph; now it runs Bob on top of
+     whatever Parse already produced. Activates Bob mode for the session:
+       - semantic risk scores + 'BOB' captions on every function node
+       - MIRE-style hover glow on the neighbourhood
+       - "Simulate Change" becomes available in the code drawer
+     Disabled until a graph has been parsed at least once. ── */
+  const loadAIGraph = useCallback(async () => {
+    if ((rawNodesRef.current || []).length === 0) {
+      setStatus('Run Parse first - Bob enriches an already-loaded graph.');
+      return;
+    }
+    setLoadingSource('ai');
+    setStatus('IBM Bob is analysing your graph…');
+    try {
+      await enrichRiskWithBob();
+      setBobModeActive(true);
+    } catch (err) {
+      setStatus(`Bob error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally {
+      setLoadingSource(null);
+    }
+  }, [enrichRiskWithBob]);
 
   /* ── Group collapse handlers ── */
   const toggleGroup = useCallback((group) => {
@@ -964,6 +1260,59 @@ export default function IbmBobApiArchitectCanvas({
     finally { setIsSaving(false); }
   }, [activeFunctionId, persistFunction, selectedNode]);
 
+  /* ── Inline-refactor flow used by CodeSidebar.
+       CodeSidebar's <Refactor> prompt calls this with a free-text goal.
+       We send the function id + current code + goal to /mcp/refactor-function
+       and return { code, explanation } so the drawer can render a PR-style
+       diff inline. CodeSidebar owns the Apply / Discard footer; when the
+       user accepts, it calls onApplyRefactor with the new source string,
+       which we route through handleApplyRefactor to actually save it. ── */
+  const handleSidebarRefactorRequest = useCallback(async (goal) => {
+    const fnTitle = selectedNode?.data?.title || selectedNode?.data?.label || 'function';
+    /* Derive a function NAME for the LLM prompt. function_id is "file.py::name";
+       fall back to title if id isn't available (manual nodes etc). */
+    const fnId = activeFunctionId || selectedNode?.data?.function_id || '';
+    const functionName = fnId.includes('::')
+      ? fnId.split('::').pop().trim()
+      : fnTitle;
+    if (!functionCode.trim()) {
+      throw new Error('No source code loaded for this function.');
+    }
+    setStatus(`Bob is refactoring ${fnTitle}…`);
+
+    /* Preview endpoint - no filesystem, works in github-URL mode too.
+       Returns the proposed code WITHOUT writing anything to disk; the
+       drawer renders the diff and only writes if the user clicks Apply. */
+    const result = await requestFunctionRefactorPreview({
+      sourceCode: functionCode,
+      functionName,
+      refactorGoal: goal,
+      preserveSignature: true,
+      modelId: selectedModelId,
+    });
+
+    const code = result?.generated_code || '';
+    const explanation = result?.explanation || result?.warnings?.[0] || '';
+    if (!code.trim()) {
+      setStatus('Bob returned no code. Try a more specific goal.');
+      throw new Error('Bob returned no code.');
+    }
+    setStatus('Refactor ready - review the diff.');
+    return { code, explanation };
+  }, [activeFunctionId, selectedNode, selectedModelId, functionCode]);
+
+  /* User accepted the diff - persist to source and refresh */
+  const handleSidebarApplyRefactor = useCallback(async (newCode) => {
+    const fnId = activeFunctionId || selectedNode?.data?.function_id || '';
+    if (!fnId || !newCode?.trim()) return;
+    setFunctionCode(newCode);
+    try {
+      await handleApplyRefactor({ functionId: fnId, generatedCode: newCode });
+    } catch (err) {
+      setStatus(`Refactor save failed: ${err instanceof Error ? err.message : 'error'}`);
+    }
+  }, [activeFunctionId, selectedNode, handleApplyRefactor]);
+
   /* ── fitView after nodes are rendered (initial load only) ── */
   useEffect(() => {
     if (!pendingFitView.current || nodes.length === 0) return;
@@ -985,6 +1334,40 @@ export default function IbmBobApiArchitectCanvas({
   const handleViewportChange = useCallback((vp) => setCurrentZoom(vp.zoom), []);
   const LOG_MIN = Math.log(0.05);
   const LOG_MAX = Math.log(4);
+
+  /* ── Selection-aware context value (stable identity per change) ──
+     Used by ApiNode + FlowEdge to brighten/dim themselves based on the
+     selected node's 1-hop neighbourhood. Memoised so child components
+     don't re-render on every parent tick. */
+  const graphCtxValue = useMemo(() => ({
+    connectedNodeIds,
+    selectedNodeId: selectedNode?.id ?? null,
+    hasSelection: Boolean(selectedNode?.id),
+    hoveredNodeId,
+    hoverConnectedNodeIds,
+    bobModeActive,
+  }), [connectedNodeIds, selectedNode?.id, hoveredNodeId, hoverConnectedNodeIds, bobModeActive]);
+
+  /* ── Bob-mode hover handlers - mirror MIRE's onNodeHover. Only fire when
+       Bob mode is active so they don't add noise to a fresh Parse view. ── */
+  const onBobNodeMouseEnter = useCallback((_evt, node) => {
+    if (!bobModeActive || !node?.id) return;
+    /* Compute 1-hop neighbourhood from the currently displayed edges */
+    const id = node.id;
+    const connected = new Set();
+    edges.forEach((e) => {
+      if (e.source === id) connected.add(e.target);
+      if (e.target === id) connected.add(e.source);
+    });
+    setHoveredNodeId(id);
+    setHoverConnectedNodeIds(connected);
+  }, [bobModeActive, edges]);
+
+  const onBobNodeMouseLeave = useCallback(() => {
+    if (!bobModeActive) return;
+    setHoveredNodeId(null);
+    setHoverConnectedNodeIds(EMPTY_SET);
+  }, [bobModeActive]);
 
   /* ── Global hotkeys: "/" opens search, Esc closes search or returns to modules, "F" fits view ── */
   useEffect(() => {
@@ -1031,7 +1414,7 @@ export default function IbmBobApiArchitectCanvas({
       >
         {nodes.length === 0 && <CanvasEmptyState isLoading={isLoadingGraph} />}
 
-        <GraphCtx.Provider value={{ connectedNodeIds, hasSelection: Boolean(selectedNode?.id) }}>
+        <GraphCtx.Provider value={graphCtxValue}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -1041,6 +1424,8 @@ export default function IbmBobApiArchitectCanvas({
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           onNodeClick={onNodeClick}
+          onNodeMouseEnter={onBobNodeMouseEnter}
+          onNodeMouseLeave={onBobNodeMouseLeave}
           onPaneClick={deselectNode}
           onInit={(instance) => { rfInstanceRef.current = instance; }}
           onViewportChange={handleViewportChange}
@@ -1210,6 +1595,8 @@ export default function IbmBobApiArchitectCanvas({
           onLoadAIGraph={loadAIGraph}
           isLoading={isLoadingGraph}
           loadingSource={loadingSource}
+          hasGraph={nodes.length > 0}
+          bobModeActive={bobModeActive}
           loadedFilePath={loadedFilePath}
           status={status}
           availableModels={availableModels}
@@ -1317,6 +1704,9 @@ export default function IbmBobApiArchitectCanvas({
           functionCode={functionCode}
           onFunctionCodeChange={setFunctionCode}
           onSaveFunction={saveCurrentFunction}
+          onSimulateChange={() => setIsSimulateChangeOpen(true)}
+          onRefactorRequest={handleSidebarRefactorRequest}
+          onApplyRefactor={handleSidebarApplyRefactor}
           onClose={deselectNode}
           isSaving={isSaving}
           isFunctionNode={showCodePanel}
@@ -1504,6 +1894,15 @@ export default function IbmBobApiArchitectCanvas({
         isLoadingModels={isLoadingModels}
         modelsSource={modelsSource}
         modelsError={modelsError}
+      />
+
+      <SimulateChangeModal
+        isOpen={isSimulateChangeOpen}
+        onClose={closeSimulateChangeModal}
+        node={selectedNode}
+        isRunning={isSimulating}
+        result={simulationResult}
+        onRun={runSimulation}
       />
     </div>
   );

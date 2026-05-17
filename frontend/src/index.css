@@ -623,6 +623,104 @@ pre, code, .mono {
   50%      { box-shadow: 0 4px 22px rgba(124,127,245,0.70), 0 0 0 3px rgba(124,127,245,0.15), 0 0 0 1px rgba(255,255,255,0.12) inset; }
 }
 
+/* ── Bob-mode hover glow (MIRE-style) ──
+   When the user hovers any node while Bob mode is active, that node and its
+   1-hop neighbours get this calm, breathing blue glow. Modelled directly on
+   MIRE's STATE_GLOW.active (#4a6fa5 / rgba(74,111,165,...)) so the look
+   matches what IBM_BOB ships. No color cycling, no flicker - just a quiet
+   "this is the live circuit" pulse. */
+@keyframes mireActiveGlow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1.5px rgba(74, 111, 165, 0.70),
+      0 0 18px 2px rgba(74, 111, 165, 0.55),
+      0 0 36px 6px rgba(74, 111, 165, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1.5px rgba(74, 111, 165, 0.95),
+      0 0 26px 4px rgba(74, 111, 165, 0.80),
+      0 0 48px 10px rgba(74, 111, 165, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+}
+
+/* Slightly stronger variant for the actually-hovered node (the focal point)
+   versus its connected neighbours - same color family, brighter centre. */
+@keyframes mireFocusGlow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(74, 111, 165, 0.95),
+      0 0 24px 4px rgba(74, 111, 165, 0.70),
+      0 0 52px 12px rgba(74, 111, 165, 0.25),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(124, 156, 210, 1),
+      0 0 34px 6px rgba(74, 111, 165, 0.95),
+      0 0 64px 16px rgba(74, 111, 165, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  }
+}
+
+.mire-active-glow { animation: mireActiveGlow 2s ease-in-out infinite; }
+.mire-focus-glow  { animation: mireFocusGlow  2s ease-in-out infinite; }
+
+/* ── Simulate Change: wave-propagation state animations ──
+   Three temporary states the graph nodes pass through while Bob is showing
+   the blast radius of a planned change. Each state has a different rhythm
+   so a viewer can read "this is the impact area" at a glance. */
+
+/* The clicked function — the epicenter. Strong, slow, pulsing red. */
+@keyframes simEpicenter {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(245,101,101,0.85),
+      0 0 26px 6px rgba(245,101,101,0.55),
+      0 0 60px 18px rgba(245,101,101,0.20),
+      inset 0 1px 0 rgba(255,255,255,0.06);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px rgba(245,101,101,1),
+      0 0 38px 10px rgba(245,101,101,0.85),
+      0 0 80px 24px rgba(245,101,101,0.30),
+      inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+}
+
+/* Affected but stable — calm purple wave passing through. */
+@keyframes simSimulated {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1.5px rgba(176,110,247,0.55),
+      0 0 18px 4px rgba(176,110,247,0.30),
+      inset 0 1px 0 rgba(255,255,255,0.05);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1.5px rgba(176,110,247,0.85),
+      0 0 28px 8px rgba(176,110,247,0.55),
+      inset 0 1px 0 rgba(255,255,255,0.07);
+  }
+}
+
+/* High-impact: the change destabilises this function. Sharp red flicker. */
+@keyframes simUnstable {
+  0%   { box-shadow: 0 0 0 2px rgba(245,101,101,0.9), 0 0 22px 5px rgba(245,101,101,0.55); }
+  18%  { box-shadow: 0 0 0 1px rgba(245,101,101,0.3), 0 0 8px  2px rgba(245,101,101,0.18); }
+  36%  { box-shadow: 0 0 0 2px rgba(245,101,101,0.95),0 0 30px 8px rgba(245,101,101,0.75); }
+  54%  { box-shadow: 0 0 0 1px rgba(245,101,101,0.4), 0 0 10px 3px rgba(245,101,101,0.25); }
+  72%  { box-shadow: 0 0 0 2px rgba(245,101,101,0.95),0 0 28px 7px rgba(245,101,101,0.65); }
+  100% { box-shadow: 0 0 0 2px rgba(245,101,101,0.9), 0 0 22px 5px rgba(245,101,101,0.55); }
+}
+
+.sim-epicenter { animation: simEpicenter 1.4s ease-in-out infinite; }
+.sim-simulated { animation: simSimulated 2.0s ease-in-out infinite; }
+.sim-unstable  { animation: simUnstable  0.7s ease-in-out infinite; }
+
 /* ================================================================
    FEATURE CARD GLOW (for homepage feature grid)
    ================================================================ */

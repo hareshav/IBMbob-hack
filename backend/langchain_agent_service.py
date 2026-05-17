@@ -505,6 +505,198 @@ class AutonomousWorkspaceAgent:
         raw = getattr(response, "content", str(response)).strip()
         return _parse_ai_json(raw)
 
+    def score_risk(self, nodes_summary: List[Dict[str, Any]], batch_size: int = 18) -> List[Dict[str, Any]]:
+        """
+        Re-score a batch of function nodes using watsonx, returning a semantic
+        risk in [0, 1] plus a short (under 8-word) description of why.
+
+        Input nodes_summary is a list of dicts that MUST include at minimum:
+          { idx: int, label: str, file: str, group: str, fan_in: int, fan_out: int, risk: float }
+
+        Returns a list of dicts: { idx, risk, description } for as many nodes
+        as the model successfully scored. Caller merges these back into the
+        full node array by idx. The two-pass design keeps the prompt small
+        even on large graphs and keeps a single bad batch from sinking the
+        whole call.
+        """
+        if not nodes_summary:
+            return []
+
+        model = self._build_chat_model()
+        results: List[Dict[str, Any]] = []
+
+        for batch_start in range(0, len(nodes_summary), batch_size):
+            batch = nodes_summary[batch_start : batch_start + batch_size]
+            lines = []
+            for n in batch:
+                lines.append(
+                    f"[{n['idx']}] {n.get('label','?')} "
+                    f"(file: {n.get('file','?')}, group: {n.get('group','utils')}, "
+                    f"fanIn: {n.get('fan_in', 0)}, fanOut: {n.get('fan_out', 0)}, "
+                    f"staticRisk: {float(n.get('risk', 0)):.2f})"
+                )
+            node_list = "\n".join(lines)
+
+            prompt = (
+                "You are a senior code-risk analyst. Score each function's security and "
+                "stability risk from 0.0 to 1.0 using the FULL range. At least one node "
+                "in the batch must score above 0.7 and at least one below 0.2 unless the "
+                "batch genuinely lacks variation. Score relatively: the most dangerous "
+                "function gets the highest score.\n\n"
+                "HIGH (0.70-1.00): handles auth, payments, secrets, tokens, writes to "
+                "persistent storage, executes user input, or is a hub (very high fanIn).\n"
+                "MEDIUM (0.40-0.69): mutations, API handlers, moderate connectivity.\n"
+                "LOW (0.00-0.39): read-only, formatters, utilities, low connectivity.\n\n"
+                "The staticRisk hint is connectivity-only - override it with semantic "
+                "judgement of what the function actually does.\n\n"
+                f"Functions:\n{node_list}\n\n"
+                "Respond ONLY with a JSON array. No prose, no markdown, no leading text.\n"
+                "Each item: { \"i\": <idx>, \"risk\": <0.0-1.0>, \"description\": <text> }\n\n"
+                "DESCRIPTION RULES (read carefully - this is shown on the graph card):\n"
+                "- Maximum 12 words.\n"
+                "- For HIGH risk (>=0.70): name the SPECIFIC reason it is risky. Do not just "
+                "say what it does. Examples:\n"
+                "    'signs and broadcasts transactions, no replay guard'\n"
+                "    'writes raw user input to database without sanitising'\n"
+                "    'issues auth tokens, called by every endpoint'\n"
+                "- For MEDIUM risk (0.40-0.69): name the mutation or boundary it touches. Examples:\n"
+                "    'mutates user profile, no input validation'\n"
+                "    'public API handler, returns DB rows directly'\n"
+                "- For LOW risk (<0.40): one-phrase summary of behaviour. Examples:\n"
+                "    'read-only topic list'\n"
+                "    'pure formatter for timestamps'\n"
+                "Do NOT use generic phrases like 'sends tx', 'gets data', or 'updates record' "
+                "without explaining the risk angle.\n"
+            )
+
+            try:
+                response = model.invoke(prompt)
+                raw = getattr(response, "content", str(response)).strip()
+                parsed = _parse_ai_array(raw)
+                for item in parsed:
+                    idx = item.get("i")
+                    if idx is None:
+                        continue
+                    try:
+                        idx_int = int(idx)
+                        risk_val = max(0.0, min(1.0, float(item.get("risk", 0))))
+                    except (TypeError, ValueError):
+                        continue
+                    # Cap at 120 chars - the UI clamps to 2 lines (~70-80 visible
+                    # chars at 9.5px) but a few extra chars give the ellipsis
+                    # breathing room and let Bob name the risk reason fully.
+                    desc = str(item.get("description", "") or "")[:120]
+                    results.append({"idx": idx_int, "risk": risk_val, "description": desc})
+            except Exception as exc:  # noqa: BLE001
+                # One bad batch must not abort the whole scoring pass.
+                # We just skip its idxs and the caller keeps the static fallback.
+                print(f"[score_risk] batch {batch_start} failed: {exc}")
+                continue
+
+        return results
+
+    def simulate_change(
+        self,
+        node_label: str,
+        file_path: str,
+        description: str,
+        connected_nodes: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Predict the blast radius of a planned change to a function.
+
+        Inputs:
+          node_label       : the function the developer wants to change
+          file_path        : where it lives
+          description      : free-text description of the change ("Skip invoice gen below $5")
+          connected_nodes  : list of {label, group, file?} 1-2 hops away in the call graph
+
+        Returns:
+          { affectedLabels: [str, ...],
+            explanation:    "2-3 sentence impact summary",
+            riskDelta:      { label: float, ... }   # 0.0 means no change, >0 means added risk }
+
+        On any failure (no API key, parse error, model timeout) returns a
+        graceful fallback so the UI still has something to animate.
+        """
+        if not connected_nodes:
+            return {
+                "affectedLabels": [],
+                "explanation": (
+                    f"Changing {node_label} has no traced downstream callers in the loaded graph. "
+                    "Re-run analysis or load more files to expand the blast radius."
+                ),
+                "riskDelta": {},
+            }
+
+        # Cap context so the prompt stays small even on hub functions
+        capped = connected_nodes[:20]
+        connected_list = "\n".join(
+            f"- {n.get('label', '?')} ({n.get('group', 'utils')}"
+            + (f", file: {n['file']}" if n.get('file') else "")
+            + ")"
+            for n in capped
+        )
+
+        prompt = (
+            "You are a software impact analyst powered by IBM Bob (watsonx).\n\n"
+            f'A developer wants to make this change to the function "{node_label}" in {file_path}:\n'
+            f'"{description}"\n\n'
+            "Connected functions that may be affected:\n"
+            f"{connected_list}\n\n"
+            "Analyse the blast radius. Which of the connected functions will be affected, "
+            "and how? What new risk does the change introduce?\n\n"
+            "Respond ONLY with a JSON object (no markdown, no prose):\n"
+            "{\n"
+            '  "affectedLabels": ["label1", "label2"],\n'
+            '  "explanation":    "2-3 sentence impact summary written for a tech lead",\n'
+            '  "riskDelta":      {"label1": 0.2, "label2": 0.1}\n'
+            "}\n"
+            "riskDelta values are added to current risk; 0 means no change, 0.3 means "
+            "significant new risk. Only include labels that genuinely change.\n"
+        )
+
+        try:
+            model = self._build_chat_model()
+            response = model.invoke(prompt)
+            raw = getattr(response, "content", str(response)).strip()
+            parsed = _parse_ai_json(raw)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[simulate_change] watsonx failed: {exc}")
+            return {
+                "affectedLabels": [n.get("label") for n in capped[:4] if n.get("label")],
+                "explanation": (
+                    f"Changing \"{node_label}\" likely affects {len(capped)} downstream "
+                    "functions. Review carefully before merging."
+                ),
+                "riskDelta": {},
+            }
+
+        # Validate and normalise the structure
+        affected = parsed.get("affectedLabels") or []
+        if not isinstance(affected, list):
+            affected = []
+        affected = [str(a) for a in affected if a]
+
+        risk_delta_raw = parsed.get("riskDelta") or {}
+        risk_delta: Dict[str, float] = {}
+        if isinstance(risk_delta_raw, dict):
+            for k, v in risk_delta_raw.items():
+                try:
+                    risk_delta[str(k)] = max(-1.0, min(1.0, float(v)))
+                except (TypeError, ValueError):
+                    continue
+
+        explanation = str(parsed.get("explanation") or "").strip()
+        if not explanation:
+            explanation = f"Changing {node_label} may affect {len(affected)} downstream functions."
+
+        return {
+            "affectedLabels": affected,
+            "explanation": explanation,
+            "riskDelta": risk_delta,
+        }
+
 
 # ── Robust JSON extractor for model responses ────────────────────────────────
 
@@ -544,6 +736,58 @@ def _parse_ai_json(text: str) -> Dict[str, Any]:
         f"IBM Bob AI returned a response that could not be parsed as JSON.\n"
         f"Raw (first 400 chars): {text[:400]}"
     )
+
+
+def _parse_ai_array(text: str) -> List[Dict[str, Any]]:
+    """
+    Sibling of _parse_ai_json for responses that should be a JSON array.
+    Granite likes to wrap arrays in "[Answer]" prefixes - take the last [...].
+    """
+    import json as _json, re as _re  # noqa: PLC0415
+
+    text = _re.sub(r'```(?:json)?\s*', '', text)
+    text = _re.sub(r'```', '', text).strip()
+
+    try:
+        result = _json.loads(text)
+        if isinstance(result, list):
+            return result
+    except _json.JSONDecodeError:
+        pass
+
+    # Find the LAST balanced [...] block. Greedy from the back so we skip
+    # any "[Answer]"-style preludes.
+    end = text.rfind(']')
+    if end == -1:
+        return []
+    depth = 0
+    start = -1
+    for i in range(end, -1, -1):
+        ch = text[i]
+        if ch == ']':
+            depth += 1
+        elif ch == '[':
+            depth -= 1
+            if depth == 0:
+                start = i
+                break
+    if start == -1:
+        return []
+
+    candidate = text[start : end + 1]
+    try:
+        result = _json.loads(candidate)
+        return result if isinstance(result, list) else []
+    except _json.JSONDecodeError:
+        pass
+
+    # Repair trailing commas
+    repaired = _re.sub(r',\s*([}\]])', r'\1', candidate)
+    try:
+        result = _json.loads(repaired)
+        return result if isinstance(result, list) else []
+    except _json.JSONDecodeError:
+        return []
 
 
 def _brace_extract(text: str) -> Optional[str]:

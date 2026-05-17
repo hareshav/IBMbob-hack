@@ -44,6 +44,22 @@ class RefactorPayload(BaseModel):
     workspace_path: Optional[str] = None
 
 
+class RefactorPreviewPayload(BaseModel):
+    """
+    Pure-LLM refactor preview. The caller passes the source code directly so
+    the backend doesn't need a connected workspace or filesystem access.
+    Used by the diff-review flow in the code drawer - lets us show Bob's
+    proposed code in both local AND github-URL workspaces without writing
+    to disk. The separate /mcp/refactor-function endpoint still handles the
+    legacy "apply immediately" path.
+    """
+    source_code: str
+    function_name: str
+    refactor_goal: str
+    preserve_signature: bool = True
+    model_id: Optional[str] = None
+
+
 def _import_main_helpers() -> Any:
     try:
         import main as bridge_main
@@ -280,6 +296,46 @@ async def refactor_function(payload: RefactorPayload) -> Dict[str, Any]:
     }
 
 
+@app.post("/mcp/refactor-preview")
+async def refactor_preview(payload: RefactorPreviewPayload) -> Dict[str, Any]:
+    """
+    Pure-LLM refactor: returns Bob's proposed code without touching the
+    filesystem. The frontend uses this to populate the diff view in the
+    code drawer; a separate save call writes the accepted code to disk.
+
+    Works in github-URL mode because nothing on disk is needed - the source
+    is shipped in the payload. Also avoids the double-write problem the
+    original /mcp/refactor-function had when combined with save-function-content.
+    """
+    if not payload.source_code.strip():
+        raise HTTPException(status_code=400, detail="source_code is required.")
+    if not payload.refactor_goal.strip():
+        raise HTTPException(status_code=400, detail="refactor_goal is required.")
+
+    bridge_main = _import_main_helpers()
+    runtime_config = _load_runtime_config(bridge_main)
+    workspace_root = _workspace_root_or_cwd(bridge_main)
+    agent = _build_agent(bridge_main, workspace_root, payload.model_id, runtime_config)
+
+    try:
+        result = agent.refactor_function(
+            source_code=payload.source_code,
+            function_name=payload.function_name,
+            refactor_goal=payload.refactor_goal.strip(),
+            preserve_signature=payload.preserve_signature,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Refactor preview failed: {exc}") from exc
+
+    return {
+        "success": True,
+        "generated_code": result.get("generated_code", ""),
+        "explanation":    result.get("explanation", ""),
+        "warnings":       result.get("warnings", []),
+        "suggestions":    result.get("suggestions", []),
+    }
+
+
 # ── AI Graph ─────────────────────────────────────────────────────────────────
 
 class AIGraphPayload(BaseModel):
@@ -374,3 +430,108 @@ async def ai_graph(payload: AIGraphPayload) -> Dict[str, Any]:
         "workspace_path": str(workspace_root),
         "source":         "ai",
     }
+
+
+class ScoreRiskNode(BaseModel):
+    idx: int
+    label: str
+    file: Optional[str] = ""
+    group: Optional[str] = "utils"
+    fan_in: Optional[int] = 0
+    fan_out: Optional[int] = 0
+    risk: Optional[float] = 0.0
+
+
+class ScoreRiskPayload(BaseModel):
+    nodes: List[ScoreRiskNode]
+    model_id: Optional[str] = None
+
+
+class ConnectedNodeSummary(BaseModel):
+    label: str
+    group: Optional[str] = "utils"
+    file: Optional[str] = ""
+
+
+class SimulateChangePayload(BaseModel):
+    node_label: str
+    file: Optional[str] = ""
+    description: str
+    connected_nodes: List[ConnectedNodeSummary] = []
+    model_id: Optional[str] = None
+
+
+def _workspace_root_or_cwd(bridge_main: Any) -> Path:
+    """
+    Loose workspace resolver for LLM-only endpoints.
+    Prefers the connected workspace if there is one, but falls back to a
+    safe placeholder path because score-risk and simulate-change never
+    touch the filesystem - they just construct a watsonx agent which
+    requires *some* workspace_root in its constructor.
+    """
+    if bridge_main.CURRENT_WORKSPACE_PATH:
+        try:
+            return Path(bridge_main.CURRENT_WORKSPACE_PATH).resolve()
+        except Exception:  # noqa: BLE001
+            pass
+    return Path.cwd().resolve()
+
+
+@app.post("/mcp/score-risk")
+async def score_risk(payload: ScoreRiskPayload) -> Dict[str, Any]:
+    """
+    Re-score a list of function nodes with IBM Bob (watsonx) and attach a
+    short semantic risk description to each. Used by the frontend to enrich
+    the graph after the "Ask Bob AI" button - turns each opaque risk bar
+    into an explainable signal a judge can read at a glance.
+
+    Returns: { scores: [{ idx, risk, description }, ...] }
+    Only nodes the model successfully scored are returned; the caller
+    leaves the rest on their static risk.
+
+    NOTE: this is a pure LLM call - it does not need a connected workspace.
+    """
+    if not payload.nodes:
+        return {"scores": []}
+
+    bridge_main = _import_main_helpers()
+    runtime_config = _load_runtime_config(bridge_main)
+    workspace_root = _workspace_root_or_cwd(bridge_main)
+    agent = _build_agent(bridge_main, workspace_root, payload.model_id, runtime_config)
+
+    nodes_summary = [n.dict() for n in payload.nodes]
+    try:
+        scores = agent.score_risk(nodes_summary)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Risk scoring failed: {exc}") from exc
+
+    return {"scores": scores}
+
+
+@app.post("/mcp/simulate-change")
+async def simulate_change(payload: SimulateChangePayload) -> Dict[str, Any]:
+    """
+    Ask IBM Bob to predict the blast radius of a planned change to a function.
+    Returns { affectedLabels, explanation, riskDelta } so the frontend can
+    animate the wave of impact across the graph.
+    """
+    if not payload.description.strip():
+        raise HTTPException(status_code=400, detail="A change description is required.")
+
+    bridge_main = _import_main_helpers()
+    runtime_config = _load_runtime_config(bridge_main)
+    workspace_root = _workspace_root_or_cwd(bridge_main)
+    agent = _build_agent(bridge_main, workspace_root, payload.model_id, runtime_config)
+
+    connected = [n.dict() for n in payload.connected_nodes]
+    try:
+        result = agent.simulate_change(
+            node_label=payload.node_label,
+            file_path=payload.file or "",
+            description=payload.description.strip(),
+            connected_nodes=connected,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Simulation failed: {exc}") from exc
+
+    return result

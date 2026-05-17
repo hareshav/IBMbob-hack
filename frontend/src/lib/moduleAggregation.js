@@ -117,7 +117,7 @@ export const isExternalStubId = (id) => typeof id === 'string' && id.startsWith(
 export const fileFromExternalStubId = (id) => (id || '').slice(EXTERNAL_PREFIX.length);
 
 /**
- * Filter the raw graph to one module's "logical" contents — its own functions,
+ * Filter the raw graph to one module's "logical" contents: its own functions,
  * PLUS input nodes whose handler lives inside the module (often declared in a
  * sibling router file), PLUS compact external-module stubs for every cross-file
  * edge so the boundary stays visible.
@@ -145,7 +145,7 @@ export function extractModuleNodes(rawNodes, rawEdges, moduleId) {
 
   /* Step 2: lift in input nodes whose handler target sits inside this module.
      Inputs are typically declared in a router file, but conceptually belong to
-     whichever service owns the handler — so they should appear here too. */
+     whichever service owns the handler: so they should appear here too. */
   for (const e of allEdges) {
     if (!inside.has(e.target)) continue;
     const src = nodeById.get(e.source);

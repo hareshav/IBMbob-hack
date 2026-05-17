@@ -4,6 +4,7 @@ import {
   MessageSquare, Sparkles, GitMerge, Check, X as XIcon,
   Lock, Unlock, Code2, Eye, ChevronDown,
 } from 'lucide-react';
+import Logo, { LogoLockup } from '../components/Logo';
 
 /* ── palette shortcuts ── */
 const C = {
@@ -15,7 +16,7 @@ const C = {
 };
 
 /* ────────────────────────────────────────────────────────────────
-   HERO BACKGROUND  — dot grid + scanline + orbs
+   HERO BACKGROUND : dot grid + scanline + orbs
    ──────────────────────────────────────────────────────────────── */
 function HeroBg() {
   return (
@@ -54,7 +55,7 @@ function HeroBg() {
 }
 
 /* ────────────────────────────────────────────────────────────────
-   FLOATING GHOST NODES  — decorative background nodes
+   FLOATING GHOST NODES : decorative background nodes
    ──────────────────────────────────────────────────────────────── */
 const GHOST_NODES = [
   { left: '7%',  top: '22%', kind: 'router',   label: 'GET /api/users',   anim: 'nodeFloat0', delay: '0s'    },
@@ -168,8 +169,8 @@ function HeroSection({ onLaunch }) {
           fontSize: 11.5, fontWeight: 600, letterSpacing: '0.03em',
           color: 'var(--text-secondary)',
         }}>
-          Powered by&nbsp;
-          <span style={{ color: C.blue }}>IBM Granite AI · watsonx.ai</span>
+          Built with&nbsp;
+          <span style={{ color: C.blue }}>IBM Bob</span>
         </span>
       </div>
 
@@ -211,9 +212,9 @@ function HeroSection({ onLaunch }) {
         animation: visible ? 'subReveal 600ms ease 260ms forwards' : 'none',
         opacity: 0,
       }}>
-        Paste a repo or local path. IBM Bob parses your codebase into an interactive
-        graph — then let IBM Granite AI answer questions, generate endpoints,
-        and refactor functions.
+        Paste a repo or local path. Bobcat parses your codebase into an
+        interactive graph, then lets IBM Bob answer questions, generate
+        endpoints, and refactor functions in plain English.
       </p>
 
       {/* ── Inline launch card ── */}
@@ -371,10 +372,10 @@ function HeroSection({ onLaunch }) {
         opacity: 0,
       }}>
         {[
-          { val: '10+',  label: 'Languages', color: C.blue   },
-          { val: 'IBM',  label: 'Granite AI', color: C.cyan  },
+          { val: '10+',  label: 'Languages',   color: C.blue   },
+          { val: 'Bob',  label: 'AI Partner',  color: C.cyan   },
           { val: '∞',    label: 'Graph Nodes', color: C.purple },
-          { val: 'Live', label: 'Code Sync',  color: C.green  },
+          { val: 'Live', label: 'Code Sync',   color: C.green  },
         ].map(({ val, label, color }) => (
           <div key={label} style={{ textAlign: 'center' }}>
             <div style={{
@@ -408,7 +409,7 @@ function HeroSection({ onLaunch }) {
 }
 
 /* ────────────────────────────────────────────────────────────────
-   CAPABILITIES SECTION  — bold dark-neo feature cards
+   CAPABILITIES SECTION : bold dark-neo feature cards
    ──────────────────────────────────────────────────────────────── */
 const CAPS = [
   {
@@ -422,22 +423,22 @@ const CAPS = [
     icon: <MessageSquare size={22} />,
     color: C.cyan,
     grad: `linear-gradient(135deg, ${C.blue} 0%, ${C.cyan} 100%)`,
-    title: 'Chat with Granite AI',
-    desc: 'Ask IBM Granite anything about your codebase. Explain a function, find a bottleneck, or get architecture recommendations in plain English.',
+    title: 'Chat with Bob',
+    desc: 'Ask IBM Bob anything about your codebase. Explain a function, find a bottleneck, or get architecture recommendations in plain English.',
   },
   {
     icon: <Sparkles size={22} />,
     color: C.purple,
     grad: `linear-gradient(135deg, ${C.indigo} 0%, ${C.purple} 100%)`,
     title: 'AI Endpoint Generator',
-    desc: 'Describe what you need. IBM Bob generates the full endpoint code — route, handler, schema — and adds it to your project graph.',
+    desc: 'Describe what you need. IBM Bob writes the full endpoint code: route, handler, and schema, then adds it to your project graph.',
   },
   {
     icon: <GitMerge size={22} />,
     color: C.green,
     grad: `linear-gradient(135deg, ${C.cyan} 0%, ${C.green} 100%)`,
     title: 'Instant Refactor',
-    desc: 'Select any function node. Granite AI rewrites it — cleaner, faster, or with a different pattern — and syncs the change back to disk.',
+    desc: 'Select any function node. IBM Bob rewrites it cleaner, faster, or with a different pattern, then syncs the change back to disk.',
   },
 ];
 
@@ -470,7 +471,7 @@ function CapabilitiesSection() {
           Everything in one canvas
         </h2>
         <p style={{ fontSize: 16, color: 'var(--text-secondary)', maxWidth: 460, margin: '0 auto', lineHeight: 1.7 }}>
-          From first load to production-ready refactor — without leaving the graph.
+          From first load to production-ready refactor: without leaving the graph.
         </p>
       </div>
 
@@ -539,12 +540,12 @@ function CapCard({ icon, color, grad, title, desc }) {
 }
 
 /* ────────────────────────────────────────────────────────────────
-   HOW IT WORKS  — vertical timeline
+   HOW IT WORKS : vertical timeline
    ──────────────────────────────────────────────────────────────── */
 const STEPS = [
-  { icon: <FolderOpen size={18} />,    color: C.blue,   label: 'Load Your Codebase',    desc: 'Paste a GitHub URL or local file path. IBM Bob scans your entire project structure in seconds, even large monorepos.' },
-  { icon: <Network size={18} />,       color: C.indigo,  label: 'Graph is Generated',    desc: 'Every router, middleware, function, and endpoint appears as a color-coded node. Edges show the exact call flow between them.' },
-  { icon: <MessageSquare size={18} />, color: C.purple,  label: 'Chat and Explore',      desc: 'Click any node to see its code. Ask Granite AI to explain it, find dependencies, or suggest improvements.' },
+  { icon: <FolderOpen size={18} />,    color: C.blue,   label: 'Load Your Codebase',     desc: 'Paste a GitHub URL or local file path. Bobcat scans your entire project structure in seconds, even large monorepos.' },
+  { icon: <Network size={18} />,       color: C.indigo, label: 'Graph is Generated',     desc: 'Every router, middleware, function, and endpoint appears as a color-coded node. Edges show the exact call flow between them.' },
+  { icon: <MessageSquare size={18} />, color: C.purple, label: 'Chat and Explore',       desc: 'Click any node to see its code. Ask IBM Bob to explain it, find dependencies, or suggest improvements.' },
   { icon: <Code2 size={18} />,         color: C.green,  label: 'Generate and Refactor',  desc: 'Create new endpoints from a description, or refactor existing ones. Changes write back to disk and the graph updates live.' },
 ];
 
@@ -693,25 +694,8 @@ export default function HomePage({ onLaunch, theme, onToggleTheme }) {
           opacity: 0.5,
         }} />
 
-        {/* Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11, position: 'relative' }}>
-          <div style={{
-            width: 34, height: 34, borderRadius: 9,
-            background: 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 100%)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 4px 16px rgba(79,142,247,0.35)',
-          }}>
-            <Zap size={17} color="#fff" strokeWidth={2.5} />
-          </div>
-          <div>
-            <div style={{ fontSize: 14.5, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '-0.025em', lineHeight: 1.1 }}>
-              IBM Bob
-            </div>
-            <div style={{ fontSize: 9.5, color: 'var(--text-muted)', letterSpacing: '0.05em', fontWeight: 500 }}>
-              API Architect
-            </div>
-          </div>
-        </div>
+        {/* Logo: Bobcat (powered by IBM Bob) */}
+        <LogoLockup size={32} />
 
         {/* Right controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, position: 'relative' }}>
@@ -726,7 +710,7 @@ export default function HomePage({ onLaunch, theme, onToggleTheme }) {
               background: C.blue, display: 'inline-block', flexShrink: 0,
             }} />
             <span style={{ fontSize: 10.5, fontWeight: 600, color: C.blue, letterSpacing: '0.02em' }}>
-              IBM Granite
+              IBM Bob
             </span>
           </div>
           <button
@@ -784,19 +768,17 @@ export default function HomePage({ onLaunch, theme, onToggleTheme }) {
             width: 26, height: 26, borderRadius: 7,
             background: 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 100%)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#fff',
           }}>
-            <Zap size={13} color="#fff" strokeWidth={2.5} />
+            <Logo size={15} color="#fff" />
           </div>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
-            IBM Bob API Architect
+            Bobcat
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 24 }}>
-          {['IBM Granite AI', 'watsonx.ai', 'React Flow'].map((t) => (
-            <span key={t} style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{t}</span>
-          ))}
-        </div>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Built for IBM Hackathon · 2025</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          Built with IBM Bob for the IBM Bob Hackathon 2026
+        </span>
       </footer>
     </div>
   );

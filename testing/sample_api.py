@@ -36,13 +36,10 @@ def list_users() -> List[dict]:
         raise ValueError("Failed to fetch active users") from e
     else:
         return build_users_response(users)
-@app.post("/api/v1/users")
 def create_user(payload: dict):
     validate_create_payload(payload)
     created = persist_user(payload)
     return {"created": created}
-
-
 @app.delete("/api/v1/users/{user_id}")
 def delete_user(user_id: int):
     target = find_user_or_404(user_id)

@@ -151,7 +151,7 @@ export default function AIRefactorFunction({
         {/* Body */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-          {/* Left panel — controls */}
+          {/* Left panel: controls */}
           <div style={{
             width: 286,
             padding: '14px 14px',
@@ -291,7 +291,7 @@ export default function AIRefactorFunction({
             </button>
           </div>
 
-          {/* Right panel — diff view */}
+          {/* Right panel: diff view */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
             {result ? (
               <div className="animate-fade-in" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

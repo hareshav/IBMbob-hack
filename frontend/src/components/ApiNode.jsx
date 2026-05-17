@@ -51,7 +51,7 @@ const GROUP_COLORS = {
   utils:         '#7C7F9A',
 };
 
-/* Stable shadow values — set via JS, never via CSS class transforms */
+/* Stable shadow values: set via JS, never via CSS class transforms */
 const shadow = {
   base:    '0 2px 10px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)',
   hovered: '0 4px 20px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06)',
@@ -130,7 +130,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
     );
   }
 
-  /* ── Module node (file-level aggregate) — large card showing per-file summary ── */
+  /* ── Module node (file-level aggregate): large card showing per-file summary ── */
   if (data?.kind === 'module') {
     const primary = data.primaryGroup ? (GROUP_COLORS[data.primaryGroup] || '#4F8EF7') : '#4F8EF7';
     const c = data.counts || {};
@@ -241,7 +241,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
     );
   }
 
-  /* ── Group supernode (collapsed group) — distinct compact render ── */
+  /* ── Group supernode (collapsed group): distinct compact render ── */
   if (data?.kind === 'group') {
     const groupColor = GROUP_COLORS[data.group] || '#7C7F9A';
     const title = data.title || data.group || 'Group';
@@ -393,7 +393,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
         transition: 'box-shadow 160ms ease, border-color 160ms ease, opacity 320ms ease',
       }}
     >
-      {/* Burst ripple rings — fire outward on selection */}
+      {/* Burst ripple rings: fire outward on selection */}
       {showBurst && (
         <>
           <div key={burstKey} style={{
@@ -410,7 +410,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
           }} />
         </>
       )}
-      {/* Left accent bar — kind color */}
+      {/* Left accent bar: kind color */}
       <div style={{
         position: 'absolute',
         left: 0, top: 7, bottom: 7,
@@ -438,7 +438,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
           {cfg.label}
         </span>
 
-        {/* Group badge — only for function nodes with a known group */}
+        {/* Group badge: only for function nodes with a known group */}
         {group && group !== 'utils' && kind === 'function' && (
           <span style={{
             fontSize: 7.5, fontWeight: 600,
@@ -502,7 +502,7 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
         </div>
       )}
 
-      {/* Fan-in / fan-out + risk bar — only for function nodes with data */}
+      {/* Fan-in / fan-out + risk bar: only for function nodes with data */}
       {kind === 'function' && (fanIn !== null || risk !== null) && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8,

@@ -176,7 +176,7 @@ export default function AIGenerateEndpoint({ isOpen, onClose, onGenerated, defau
         {/* Body */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-          {/* Left panel — form */}
+          {/* Left panel: form */}
           <div style={{
             width: '42%',
             padding: '20px 22px',
@@ -310,7 +310,7 @@ export default function AIGenerateEndpoint({ isOpen, onClose, onGenerated, defau
                 <textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Describe what this endpoint should do — inputs, outputs, validation, error cases, business logic…"
+                  placeholder="Describe what this endpoint should do: inputs, outputs, validation, error cases, business logic…"
                   rows={6}
                   style={{
                     width: '100%', resize: 'none',
@@ -428,7 +428,7 @@ export default function AIGenerateEndpoint({ isOpen, onClose, onGenerated, defau
             </button>
           </div>
 
-          {/* Right panel — result / empty state */}
+          {/* Right panel: result / empty state */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
             {result ? (
               <ResultPanel result={result} onCopy={handleCopy} copied={copied} onReset={resetForm} onClose={onClose} />

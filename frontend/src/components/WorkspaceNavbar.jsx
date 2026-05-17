@@ -2,15 +2,16 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowLeft, Play, RefreshCw,
-  Bot, Sparkles,
+  Sparkles,
   Sun, Moon, PanelLeftClose, PanelLeftOpen, Cpu,
   Plus, ChevronDown, MousePointerClick,
 } from 'lucide-react';
+import Logo from './Logo';
 
 export default function WorkspaceNavbar({
   onBack, mode, theme, onToggleTheme,
   mainFilePath, onMainFilePathChange,
-  onLoadGraph, onLoadAIGraph, isLoading, loadedFilePath,
+  onLoadGraph, onLoadAIGraph, isLoading, loadingSource, loadedFilePath,
   availableModels, selectedModelId, onSelectedModelIdChange,
   isLoadingModels,
   onOpenChatbot, onOpenGenerateEndpoint,
@@ -20,8 +21,29 @@ export default function WorkspaceNavbar({
   onAddManually,
 }) {
   const [inputFocused, setInputFocused] = useState(false);
-  const hasPath = Boolean((mainFilePath || '').trim());
-  const parseDisabled = isLoading || !hasPath;
+  const trimmed = (mainFilePath || '').trim();
+  const hasPath = Boolean(trimmed);
+
+  /* Per-mode input validation. The HomePage decides which mode the user
+     opened the workspace in; the toolbar enforces that choice so they can't
+     accidentally paste a GitHub URL into a local-path workflow (or vice
+     versa) and then wonder why it errored. */
+  const looksLikeUrl    = /^(https?:\/\/|git@|ssh:\/\/)/i.test(trimmed);
+  const looksLikeGithub = /github\.com[\/:]/i.test(trimmed);
+  let pathError = null;
+  if (hasPath) {
+    if (mode === 'github' && !looksLikeGithub) {
+      pathError = 'Enter a github.com URL (this workspace was opened in GitHub mode).';
+    } else if (mode === 'local' && looksLikeUrl) {
+      pathError = 'This is a local-path workspace. Use a file path like /Users/.../main.py';
+    }
+  }
+
+  const parseDisabled = isLoading || !hasPath || Boolean(pathError);
+  /* Per-button spinner state: only the button that was clicked shows its loader.
+     The other one is greyed-disabled but keeps its idle label. */
+  const isParseLoading = loadingSource === 'parse';
+  const isAILoading    = loadingSource === 'ai';
 
   return (
     <nav style={{
@@ -78,7 +100,8 @@ export default function WorkspaceNavbar({
         flex: 1, minWidth: 0,
         display: 'flex', alignItems: 'center', gap: 7,
         padding: '0 12px',
-        maxWidth: 640, margin: '0 auto',
+        maxWidth: 720, margin: '0 auto',
+        position: 'relative',
       }}>
         <div style={{
           flex: 1, minWidth: 0,
@@ -86,18 +109,40 @@ export default function WorkspaceNavbar({
           height: 34,
           background: 'var(--bg-input)',
           border: '1px solid',
-          borderColor: inputFocused
-            ? '#4F8EF7'
-            : loadedFilePath
-              ? 'rgba(26,224,160,0.45)'
-              : 'var(--border-default)',
+          borderColor: pathError
+            ? 'rgba(245,101,101,0.55)'
+            : inputFocused
+              ? '#4F8EF7'
+              : loadedFilePath
+                ? 'rgba(26,224,160,0.45)'
+                : 'var(--border-default)',
           borderRadius: 8,
           overflow: 'hidden',
           transition: 'border-color 150ms ease, box-shadow 150ms ease',
-          boxShadow: inputFocused ? '0 0 0 3px rgba(79,142,247,0.14)' : 'none',
+          boxShadow: pathError
+            ? '0 0 0 3px rgba(245,101,101,0.14)'
+            : inputFocused
+              ? '0 0 0 3px rgba(79,142,247,0.14)'
+              : 'none',
         }}>
-          {loadedFilePath && !inputFocused && (
-            <span style={{ paddingLeft: 10, color: '#1AE0A0', flexShrink: 0, display: 'flex', alignItems: 'center', fontSize: 12 }}>✓</span>
+          {/* Mode pill: tells the user at a glance which input they're filling */}
+          <span style={{
+            margin: '0 2px 0 8px',
+            padding: '3px 7px',
+            borderRadius: 6,
+            fontSize: 9.5, fontWeight: 700,
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            flexShrink: 0,
+            background: mode === 'github' ? 'rgba(46,216,240,0.14)' : 'rgba(176,110,247,0.14)',
+            color:      mode === 'github' ? '#2ED8F0' : '#B06EF7',
+            border:     mode === 'github' ? '1px solid rgba(46,216,240,0.32)' : '1px solid rgba(176,110,247,0.32)',
+          }}>
+            {mode === 'github' ? 'GitHub' : 'Local'}
+          </span>
+          {loadedFilePath && !inputFocused && !pathError && (
+            <span style={{ paddingLeft: 6, color: '#1AE0A0', flexShrink: 0, display: 'flex', alignItems: 'center', fontSize: 12 }}>✓</span>
           )}
           <input
             type="text"
@@ -156,7 +201,7 @@ export default function WorkspaceNavbar({
             e.currentTarget.style.boxShadow = parseDisabled ? 'none' : '0 2px 14px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.12)';
           }}
         >
-          {isLoading
+          {isParseLoading
             ? <><RefreshCw size={12} className="animate-spin" /> Analyzing</>
             : <><Play size={12} strokeWidth={2.5} /> Parse</>
           }
@@ -199,7 +244,7 @@ export default function WorkspaceNavbar({
             e.currentTarget.style.boxShadow = parseDisabled ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
           }}
         >
-          {isLoading
+          {isAILoading
             ? <><RefreshCw size={12} className="animate-spin" /> Bob thinking…</>
             : <>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -209,6 +254,30 @@ export default function WorkspaceNavbar({
               </>
           }
         </button>
+
+        {/* Inline validation toast: floats below the input row when the user
+            types a path that doesn't match the current workspace mode. */}
+        {pathError && (
+          <div style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 12, right: 12,
+            zIndex: 5,
+            padding: '6px 10px',
+            borderRadius: 7,
+            background: 'rgba(245,101,101,0.10)',
+            border: '1px solid rgba(245,101,101,0.32)',
+            color: '#F56565',
+            fontSize: 11, fontWeight: 500,
+            fontFamily: "'JetBrains Mono', monospace",
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+            animation: 'fadeInDown 180ms ease forwards',
+          }}>
+            {pathError}
+          </div>
+        )}
       </div>
 
       <VSep />
@@ -216,7 +285,7 @@ export default function WorkspaceNavbar({
       {/* ── Right ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '0 6px 0 8px', flexShrink: 0 }}>
 
-        {/* Model selector — styled as IBM-blue chip */}
+        {/* Model selector: styled as IBM-blue chip */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 5,
           padding: '4px 8px 4px 8px',
@@ -251,7 +320,7 @@ export default function WorkspaceNavbar({
 
         <VSep />
 
-        {/* Add Endpoint dropdown — primary "create" entry point. Delete lives in
+        {/* Add Endpoint dropdown: primary "create" entry point. Delete lives in
             the side panel + on the selected node's own context (it's contextual). */}
         <AddEndpointMenu
           onAddManually={onAddManually}
@@ -260,9 +329,10 @@ export default function WorkspaceNavbar({
 
         <VSep />
 
-        {/* Chat is the only persistent AI action here. Refactor is contextual —
-            it lives on the selected function's panel where it actually applies. */}
-        <ColorBtn icon={<Bot size={13} />} label="Chat" color="#4F8EF7" onClick={onOpenChatbot} />
+        {/* Chat with Bob - hero CTA. This is the IBM Bob entry point, the thing
+            the hackathon is judged on, so it must read as the primary action in
+            the toolbar (not just another pill). */}
+        <ChatWithBobButton onClick={onOpenChatbot} />
 
         <VSep />
 
@@ -279,6 +349,68 @@ export default function WorkspaceNavbar({
 function VSep() {
   return (
     <div style={{ width: 1, height: 20, flexShrink: 0, margin: '0 3px', background: 'var(--border-subtle)' }} />
+  );
+}
+
+/* ── Chat with Bob: the hero CTA that anchors the right side of the toolbar.
+       Gradient fill, the Bobcat eyes as the icon, a soft pulsing halo. Designed
+       to be the most prominent interactive element in the navbar so a judge
+       glancing at the screen immediately sees the IBM Bob integration. ── */
+function ChatWithBobButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        position: 'relative',
+        height: 34, padding: '0 14px 0 12px',
+        borderRadius: 9,
+        background: 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 50%, #B06EF7 100%)',
+        backgroundSize: '200% 100%',
+        border: 'none',
+        color: '#fff',
+        fontSize: 12.5, fontWeight: 700,
+        letterSpacing: '0.01em',
+        cursor: 'pointer',
+        display: 'flex', alignItems: 'center', gap: 8,
+        whiteSpace: 'nowrap',
+        fontFamily: 'inherit',
+        boxShadow: '0 4px 18px rgba(124,127,245,0.45), 0 0 0 1px rgba(255,255,255,0.10) inset',
+        transition: 'transform 150ms ease, box-shadow 150ms ease, background-position 600ms ease',
+        animation: 'chatBobPulse 2.4s ease-in-out infinite',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = 'translateY(-1px)';
+        e.currentTarget.style.boxShadow = '0 8px 28px rgba(124,127,245,0.6), 0 0 0 1px rgba(255,255,255,0.16) inset';
+        e.currentTarget.style.backgroundPosition = '100% 0';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = 'none';
+        e.currentTarget.style.boxShadow = '0 4px 18px rgba(124,127,245,0.45), 0 0 0 1px rgba(255,255,255,0.10) inset';
+        e.currentTarget.style.backgroundPosition = '0 0';
+      }}
+    >
+      {/* Bobcat-eyes mark inside a tinted disc */}
+      <span style={{
+        width: 22, height: 22, borderRadius: 6,
+        background: 'rgba(255,255,255,0.16)',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <Logo size={13} color="#fff" />
+      </span>
+      <span>Chat with Bob</span>
+      <span style={{
+        marginLeft: 2,
+        fontSize: 9, fontWeight: 700,
+        padding: '2px 6px',
+        borderRadius: 100,
+        background: 'rgba(255,255,255,0.18)',
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+      }}>
+        AI
+      </span>
+    </button>
   );
 }
 
@@ -315,7 +447,7 @@ function NBtn({ children, onClick, tooltip }) {
   );
 }
 
-/* ── Colored AI/action button — always-on color ── */
+/* ── Colored AI/action button: always-on color ── */
 function ColorBtn({ icon, label, color, onClick, disabled = false, tooltip }) {
   return (
     <button
@@ -358,7 +490,7 @@ function ColorBtn({ icon, label, color, onClick, disabled = false, tooltip }) {
   );
 }
 
-/* ── Add Endpoint dropdown — menu rendered via portal so it escapes the navbar's
+/* ── Add Endpoint dropdown: menu rendered via portal so it escapes the navbar's
        overflow:hidden + any parent stacking contexts. ── */
 function AddEndpointMenu({ onAddManually, onGenerate }) {
   const [open, setOpen] = useState(false);

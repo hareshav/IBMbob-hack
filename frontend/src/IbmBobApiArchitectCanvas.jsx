@@ -34,7 +34,7 @@ const FALLBACK_MODELS = [
   'mistralai/mistral-medium-2505', 'openai/gpt-oss-120b',
 ];
 
-/* ── Custom node/edge types — defined outside component so refs are stable ── */
+/* ── Custom node/edge types: defined outside component so refs are stable ── */
 const NODE_TYPES = { api: ApiNode };
 const EDGE_TYPES = { flow: FlowEdge };
 
@@ -47,12 +47,12 @@ const arrowFor = (eType) => ({
   height: 16,
 });
 
-/* ── Atmospheric canvas background — vivid colored orbs ── */
+/* ── Atmospheric canvas background: vivid colored orbs ── */
 function AtmosphericBg({ theme }) {
   const dark = theme !== 'light';
   return (
     <div className="atm-bg" style={{ zIndex: 0 }}>
-      {/* Orb 1 — blue, top-left */}
+      {/* Orb 1: blue, top-left */}
       <div style={{
         position: 'absolute',
         width: 900, height: 900, borderRadius: '50%',
@@ -64,7 +64,7 @@ function AtmosphericBg({ theme }) {
         animation: 'orbFloat1 18s ease-in-out infinite',
         pointerEvents: 'none',
       }} />
-      {/* Orb 2 — purple, bottom-right */}
+      {/* Orb 2: purple, bottom-right */}
       <div style={{
         position: 'absolute',
         width: 800, height: 800, borderRadius: '50%',
@@ -76,7 +76,7 @@ function AtmosphericBg({ theme }) {
         animation: 'orbFloat2 22s ease-in-out infinite 3s',
         pointerEvents: 'none',
       }} />
-      {/* Orb 3 — cyan, center */}
+      {/* Orb 3: cyan, center */}
       <div style={{
         position: 'absolute',
         width: 600, height: 600, borderRadius: '50%',
@@ -88,7 +88,7 @@ function AtmosphericBg({ theme }) {
         animation: 'orbFloat1 28s ease-in-out infinite 8s',
         pointerEvents: 'none',
       }} />
-      {/* Orb 4 — green, middle-left */}
+      {/* Orb 4: green, middle-left */}
       <div style={{
         position: 'absolute',
         width: 500, height: 500, borderRadius: '50%',
@@ -100,7 +100,7 @@ function AtmosphericBg({ theme }) {
         animation: 'orbFloat2 32s ease-in-out infinite 12s',
         pointerEvents: 'none',
       }} />
-      {/* Orb 5 — indigo, top-right */}
+      {/* Orb 5: indigo, top-right */}
       <div style={{
         position: 'absolute',
         width: 500, height: 500, borderRadius: '50%',
@@ -346,7 +346,9 @@ export default function IbmBobApiArchitectCanvas({
   /* Two-tier view: 'modules' shows one node per file; 'expanded' drills into one module */
   const [viewMode, setViewMode] = useState('modules');         // 'modules' | 'expanded'
   const [expandedModuleId, setExpandedModuleId] = useState(null);
-  const [isTransitioning, setIsTransitioning] = useState(false); // for fade animation
+  const [transition, setTransition] = useState(null);
+  /* transition shape: { phase: 'opening'|'closing', label, originX, originY } | null
+     Drives the portal-style overlay so users see WHAT is opening, not just a camera jolt. */
 
   const [mainFilePath, setMainFilePath] = useState(initialPath);
   const [newNodeLabel, setNewNodeLabel] = useState('Router Node');
@@ -362,7 +364,10 @@ export default function IbmBobApiArchitectCanvas({
   const [functionCode, setFunctionCode]       = useState('');
   const [activeFunctionId, setActiveFunctionId] = useState('');
   const [syntaxErrors, setSyntaxErrors]       = useState([]);
-  const [isLoadingGraph, setIsLoadingGraph]   = useState(false);
+  /* Tracks WHICH engine is loading so only the clicked button spins.
+     null = idle. 'parse' = AST parser. 'ai' = watsonx. */
+  const [loadingSource, setLoadingSource] = useState(null);
+  const isLoadingGraph = Boolean(loadingSource);
   const [isSaving, setIsSaving]               = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [isNodeChatOpen, setIsNodeChatOpen]   = useState(false);
@@ -452,7 +457,7 @@ export default function IbmBobApiArchitectCanvas({
     setEdges((cur) => addEdge(newEdge, cur));
   }, [setEdges]);
 
-  /* ── Add node — kept in both raw and display so collapse re-derivation preserves it ── */
+  /* ── Add node: kept in both raw and display so collapse re-derivation preserves it ── */
   const addManualNode = useCallback((reqKind, reqLabel) => {
     const kind  = reqKind ?? newNodeKind;
     const label = (reqLabel ?? newNodeLabel).trim() || (kind === 'router' ? 'Express Router' : 'New Node');
@@ -581,11 +586,11 @@ export default function IbmBobApiArchitectCanvas({
     setSelectedNode(null); setFunctionCode(''); setActiveFunctionId('');
   }, [setEdges, setNodes]);
 
-  /* ── Delete node — in local mode + real node ⇒ actually delete from source ── */
+  /* ── Delete node: in local mode + real node ⇒ actually delete from source ── */
   const deleteSelectedNode = useCallback(async () => {
     if (!selectedNode?.id) return;
     const id = selectedNode.id;
-    if (isSupernodeId(id)) { setStatus('Cannot delete a collapsed group — expand it first.'); return; }
+    if (isSupernodeId(id)) { setStatus('Cannot delete a collapsed group: expand it first.'); return; }
 
     const isManual = id.startsWith('manual-');
     const fnId = selectedNode.data?.function_id;
@@ -593,7 +598,7 @@ export default function IbmBobApiArchitectCanvas({
 
     if (!canDeleteFromSource) {
       removeNodeVisualOnly(id);
-      setStatus(isManual ? 'Node deleted (visual).' : 'Node hidden (view-only mode — source not modified).');
+      setStatus(isManual ? 'Node deleted (visual).' : 'Node hidden (view-only mode: source not modified).');
       return;
     }
 
@@ -620,12 +625,12 @@ export default function IbmBobApiArchitectCanvas({
     }
   }, [selectedNode, canEdit, removeNodeVisualOnly, applyGraphPayload]);
 
-  /* ── Create router — in local mode prompts for a path then writes a real scaffold;
+  /* ── Create router: in local mode prompts for a path then writes a real scaffold;
        in github (view-only) mode falls back to a visual node ── */
   const createRouter = useCallback(async () => {
     if (!canEdit) {
       addManualNode('router', 'Express Router');
-      setStatus('Added router node (visual only — connect a local workspace to write files).');
+      setStatus('Added router node (visual only: connect a local workspace to write files).');
       return;
     }
     const input = window.prompt(
@@ -655,7 +660,7 @@ export default function IbmBobApiArchitectCanvas({
   const loadGraph = useCallback(async () => {
     const path = mainFilePath.trim();
     if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
-    setIsLoadingGraph(true); setStatus('Analyzing…');
+    setLoadingSource('parse'); setStatus('Analyzing…');
     try {
       const payload = await loadMainFileGraph(path);
       const label = payload.source_label || payload.main_file_path || path;
@@ -665,14 +670,14 @@ export default function IbmBobApiArchitectCanvas({
       pendingFitView.current = true;
     } catch (err) {
       setStatus(`Error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
-    } finally { setIsLoadingGraph(false); }
+    } finally { setLoadingSource(null); }
   }, [applyGraphPayload, mainFilePath]);
 
   /* ── Load graph (IBM Bob AI semantic analysis) ── */
   const loadAIGraph = useCallback(async () => {
     const path = mainFilePath.trim();
     if (!path) { setStatus('Enter a path or GitHub URL.'); return; }
-    setIsLoadingGraph(true);
+    setLoadingSource('ai');
     setStatus('IBM Bob AI is reading your codebase…');
     try {
       const payload = await requestAIGraph(path, selectedModelId);
@@ -684,7 +689,7 @@ export default function IbmBobApiArchitectCanvas({
       pendingFitView.current = true;
     } catch (err) {
       setStatus(`AI Error: ${err instanceof Error ? err.message : 'Unexpected error'}`);
-    } finally { setIsLoadingGraph(false); }
+    } finally { setLoadingSource(null); }
   }, [applyGraphPayload, mainFilePath, selectedModelId]);
 
   /* ── Group collapse handlers ── */
@@ -701,7 +706,7 @@ export default function IbmBobApiArchitectCanvas({
   }, [availableGroups]);
   const expandAll = useCallback(() => setCollapsedGroups(new Set()), []);
 
-  /* ── Pan/zoom camera to a node — used by both onNodeClick and CanvasSearch ── */
+  /* ── Pan/zoom camera to a node: used by both onNodeClick and CanvasSearch ── */
   const flyToNode = useCallback((node, opts = {}) => {
     if (!node?.position) return;
     const { duration = 500, minZoom = 0.85 } = opts;
@@ -716,54 +721,108 @@ export default function IbmBobApiArchitectCanvas({
     }, 40);
   }, []);
 
-  /* ── Open a module: cinematic zoom toward the card, fade, then expand ── */
+  /* ── Open a module: one continuous outward motion ──
+     The previous design did zoom-IN then zoom-OUT which read as visual noise.
+     New choreography:
+       (1) Compute the screen-space origin of the clicked card (so the portal
+           overlay can radiate FROM the card, anchoring the user's eye).
+       (2) Gentle pan to center the card without changing zoom: a small
+           "selection" motion, not a flight.
+       (3) A portal overlay fades in and a clear "Opening X" label appears so
+           a first-time viewer can tell what's happening.
+       (4) Swap layout state behind the overlay.
+       (5) Camera does a single graceful fitView OUTWARD to embrace the
+           new subgraph. Feels like "pulling back to reveal what's inside",
+           not "zooming away".  ── */
   const openModule = useCallback((node) => {
     if (!node?.data?.moduleId) return;
     fitViewTimers.current.forEach(clearTimeout);
     fitViewTimers.current = [];
 
-    /* Phase 1: fly camera toward the module card */
-    flyToNode(node, { duration: 520, minZoom: 1.55 });
-    setIsTransitioning(true);
+    const rf = rfInstanceRef.current;
+    const label = node.data.label || node.data.file || 'module';
 
-    /* Phase 2: after the fly completes, swap the view to "expanded" */
+    /* Screen-space origin of the clicked card, for the portal overlay anchor */
+    let originX = window.innerWidth / 2;
+    let originY = window.innerHeight / 2;
+    if (rf?.flowToScreenPosition && node?.position) {
+      try {
+        const s = rf.flowToScreenPosition({
+          x: node.position.x + 130,
+          y: node.position.y + 80,
+        });
+        originX = s.x; originY = s.y;
+      } catch { /* fallback to viewport center */ }
+    }
+
+    setTransition({ phase: 'opening', label, originX, originY });
+    setStatus(`Opening ${label}…`);
+
+    /* Phase 1 (0–240ms): gentle pan + selection pulse on the card.
+       Keep the current zoom; just slide the card to center. */
+    if (rf && node?.position) {
+      rf.setCenter(
+        node.position.x + 130,
+        node.position.y + 80,
+        { duration: 240, zoom: rf.getZoom() },
+      );
+    }
+
+    /* Phase 2 (~340ms): portal is at peak intensity; swap layout under it. */
     setTimeout(() => {
       setExpandedModuleId(node.data.moduleId);
       setViewMode('expanded');
-      setStatus(`Opened module: ${node.data.label || node.data.file}`);
-      /* Phase 3: re-fit to the newly-laid-out subgraph */
-      setTimeout(() => {
-        rfInstanceRef.current?.fitView({ padding: 0.22, duration: 520 });
-        setIsTransitioning(false);
-      }, 260);
-    }, 380);
-  }, [flyToNode]);
+    }, 340);
 
-  /* ── Close an expanded module: zoom-out fade, then back to overview ── */
+    /* Phase 3 (~480ms): single outward fitView: slow, generous easing.
+       This is the ONLY camera motion the user "sees moving": it reads as
+       "pulling back to reveal what's inside the module". */
+    setTimeout(() => {
+      rfInstanceRef.current?.fitView({ padding: 0.22, duration: 780 });
+    }, 480);
+
+    /* Phase 4 (~1300ms): tear down the overlay */
+    setTimeout(() => {
+      setTransition(null);
+      setStatus(`Inside: ${label}`);
+    }, 1300);
+  }, []);
+
+  /* ── Close an expanded module: mirror of open, also single outward motion.
+     The eye anchor is the canvas center (no specific card to focus on yet). ── */
   const closeModule = useCallback(() => {
-    setIsTransitioning(true);
-    /* Pull camera back slightly to telegraph the zoom-out */
-    const rf = rfInstanceRef.current;
-    if (rf) {
-      const cur = rf.getZoom();
-      rf.zoomTo(Math.max(0.6, cur * 0.7), { duration: 320 });
-    }
+    setTransition({
+      phase: 'closing',
+      label: 'modules overview',
+      originX: window.innerWidth / 2,
+      originY: window.innerHeight / 2,
+    });
+    setStatus('Returning to modules overview…');
+
+    /* Phase 1: hold camera, let overlay establish */
+    /* Phase 2 (~280ms): swap layout under the overlay */
     setTimeout(() => {
       setExpandedModuleId(null);
       setViewMode('modules');
       setCollapsedGroups(new Set());
       setSelectedNode(null);
-      setStatus('Back to modules overview.');
-      setTimeout(() => {
-        rfInstanceRef.current?.fitView({ padding: 0.2, duration: 520 });
-        setIsTransitioning(false);
-      }, 260);
-    }, 320);
+    }, 280);
+
+    /* Phase 3 (~420ms): single fitView to settle on the modules layout */
+    setTimeout(() => {
+      rfInstanceRef.current?.fitView({ padding: 0.2, duration: 720 });
+    }, 420);
+
+    /* Phase 4: tear down */
+    setTimeout(() => {
+      setTransition(null);
+      setStatus('Modules overview');
+    }, 1200);
   }, []);
 
   /* ── Node click ── */
   const onNodeClick = useCallback((evt, node) => {
-    /* Cancel any auto-fitView pending from graph load — user is interacting now */
+    /* Cancel any auto-fitView pending from graph load: user is interacting now */
     fitViewTimers.current.forEach(clearTimeout);
     fitViewTimers.current = [];
     pendingFitView.current = false;
@@ -774,17 +833,23 @@ export default function IbmBobApiArchitectCanvas({
       return;
     }
 
-    /* External-module stub: navigate to that module (swap, don't double-zoom) */
+    /* External-module stub: navigate to that module (reuses the portal transition) */
     if (node?.data?.kind === 'external' && node?.data?.moduleId) {
-      setIsTransitioning(true);
-      setTimeout(() => {
-        setExpandedModuleId(node.data.moduleId);
-        setStatus(`Jumped to module: ${node.data.label || node.data.moduleId}`);
-        setTimeout(() => {
-          rfInstanceRef.current?.fitView({ padding: 0.22, duration: 520 });
-          setIsTransitioning(false);
-        }, 280);
-      }, 180);
+      const label = node.data.label || node.data.moduleId;
+      const rf = rfInstanceRef.current;
+      let originX = window.innerWidth / 2;
+      let originY = window.innerHeight / 2;
+      if (rf?.flowToScreenPosition && node?.position) {
+        try {
+          const s = rf.flowToScreenPosition({ x: node.position.x + 105, y: node.position.y + 30 });
+          originX = s.x; originY = s.y;
+        } catch { /* fallback */ }
+      }
+      setTransition({ phase: 'opening', label, originX, originY });
+      setStatus(`Jumping to ${label}…`);
+      setTimeout(() => setExpandedModuleId(node.data.moduleId), 280);
+      setTimeout(() => rfInstanceRef.current?.fitView({ padding: 0.22, duration: 720 }), 420);
+      setTimeout(() => { setTransition(null); setStatus(`Inside: ${label}`); }, 1200);
       return;
     }
 
@@ -813,7 +878,7 @@ export default function IbmBobApiArchitectCanvas({
 
     setIsNodeChatOpen(true);
 
-    /* Always fly camera to the clicked node — longer zoom for direct clicks */
+    /* Always fly camera to the clicked node: longer zoom for direct clicks */
     flyToNode(node, {
       duration: evt === null ? 420 : 650,
       minZoom:  evt === null ? 0.6  : 0.9,
@@ -854,9 +919,9 @@ export default function IbmBobApiArchitectCanvas({
     const payload = await saveFunctionContent(functionId, content);
     const errs = payload.syntax_errors || [];
     setSyntaxErrors(errs);
-    if (payload.has_syntax_errors) { setStatus(`${label} — ${errs.length} syntax error(s)`); return payload; }
+    if (payload.has_syntax_errors) { setStatus(`${label}: ${errs.length} syntax error(s)`); return payload; }
     if (payload.graph) {
-      applyGraphPayload(payload.graph, `${label} — graph refreshed`);
+      applyGraphPayload(payload.graph, `${label}: graph refreshed`);
       const refreshed = payload.graph.nodes?.find((n) => n?.data?.function_id === functionId);
       if (refreshed) { setSelectedNode(refreshed); setFunctionCode(refreshed.data?.code || ''); setActiveFunctionId(refreshed.data?.function_id || functionId); }
     } else { setStatus(label); }
@@ -988,10 +1053,10 @@ export default function IbmBobApiArchitectCanvas({
           zoomOnPinch={true}
           zoomOnDoubleClick={false}
           selectNodesOnDrag={false}
-          /* snapToGrid intentionally OFF — causes position jump on click */
+          /* snapToGrid intentionally OFF: causes position jump on click */
           minZoom={0.05}
           maxZoom={4}
-          /* fitView prop removed — handled programmatically after nodes render */
+          /* fitView prop removed: handled programmatically after nodes render */
           style={{ background: 'transparent', height: '100%', width: '100%' }}
           proOptions={{ hideAttribution: false }}
         >
@@ -1144,6 +1209,7 @@ export default function IbmBobApiArchitectCanvas({
           onLoadGraph={loadGraph}
           onLoadAIGraph={loadAIGraph}
           isLoading={isLoadingGraph}
+          loadingSource={loadingSource}
           loadedFilePath={loadedFilePath}
           status={status}
           availableModels={availableModels}
@@ -1235,7 +1301,7 @@ export default function IbmBobApiArchitectCanvas({
             pointerEvents: 'none', zIndex: 10,
           }} />
         )}
-        {/* Scan-line sweep — replays each time a new function is focused */}
+        {/* Scan-line sweep: replays each time a new function is focused */}
         {showCodePanel && (
           <div key={activeFunctionId} style={{
             position: 'absolute', top: 0, left: 0, right: 0, height: 3,
@@ -1270,7 +1336,7 @@ export default function IbmBobApiArchitectCanvas({
       {/* ── Layer 8: Color legend (bottom-left) ── */}
       {nodes.length > 0 && <CanvasLegend />}
 
-      {/* ── Layer 9: Groups panel — only useful when drilled into a module ── */}
+      {/* ── Layer 9: Groups panel: only useful when drilled into a module ── */}
       {viewMode === 'expanded' && availableGroups.length > 0 && (
         <GroupsPanel
           groups={availableGroups}
@@ -1331,17 +1397,85 @@ export default function IbmBobApiArchitectCanvas({
         </button>
       )}
 
-      {/* ── Layer 11: Transition fade overlay (during module open/close) ── */}
-      {isTransitioning && (
+      {/* ── Layer 11: Portal transition overlay (during module open/close) ──
+           Three visual layers anchored to the click origin so it's obvious WHAT
+           is opening, not just "the canvas changed":
+             1. Radial dim mask centered on the clicked card.
+             2. Expanding portal ring(s): your eye follows them outward.
+             3. A floating "Opening X" label, fades in then drifts away. ── */}
+      {transition && (
         <div
+          aria-live="polite"
           style={{
             position: 'absolute', inset: 0,
-            background: 'radial-gradient(circle at center, rgba(79,142,247,0.10) 0%, rgba(7,6,28,0.30) 70%)',
             pointerEvents: 'none',
             zIndex: 19,
-            animation: 'fadeIn 200ms ease forwards',
+            overflow: 'hidden',
           }}
-        />
+        >
+          {/* (1) Radial dim: anchored to the click origin */}
+          <div style={{
+            position: 'absolute', inset: 0,
+            background: `radial-gradient(circle at ${transition.originX}px ${transition.originY}px,
+                          rgba(79,142,247,0.18) 0%,
+                          rgba(79,142,247,0.10) 22%,
+                          rgba(7,6,28,0.55) 70%)`,
+            animation: 'portalDim 1200ms cubic-bezier(0.4, 0, 0.2, 1) forwards',
+          }} />
+
+          {/* (2) Portal ring: expands from the origin */}
+          <div style={{
+            position: 'absolute',
+            left: transition.originX - 60,
+            top: transition.originY - 60,
+            width: 120, height: 120,
+            borderRadius: '50%',
+            border: '2px solid rgba(79,142,247,0.7)',
+            boxShadow: '0 0 30px 8px rgba(79,142,247,0.4)',
+            animation: 'portalRing 900ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards',
+            transformOrigin: 'center',
+          }} />
+          <div style={{
+            position: 'absolute',
+            left: transition.originX - 40,
+            top: transition.originY - 40,
+            width: 80, height: 80,
+            borderRadius: '50%',
+            border: '1.5px solid rgba(124,127,245,0.55)',
+            animation: 'portalRing 900ms cubic-bezier(0.2, 0.7, 0.2, 1) 120ms forwards',
+            transformOrigin: 'center',
+          }} />
+
+          {/* (3) "Opening X" label: floats up from the origin then settles */}
+          <div style={{
+            position: 'absolute',
+            left: transition.originX,
+            top: transition.originY,
+            transform: 'translate(-50%, -50%)',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+            animation: 'portalLabel 1200ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards',
+          }}>
+            <div style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: '0.2em',
+              color: '#4F8EF7',
+              fontFamily: "'JetBrains Mono', monospace",
+              textTransform: 'uppercase',
+            }}>
+              {transition.phase === 'opening' ? 'Opening' : 'Returning'}
+            </div>
+            <div style={{
+              fontSize: 18, fontWeight: 700,
+              color: 'var(--text-primary)',
+              fontFamily: "'JetBrains Mono', monospace",
+              textShadow: '0 0 18px rgba(79,142,247,0.5), 0 0 32px rgba(7,6,28,0.8)',
+              maxWidth: '70vw',
+              textAlign: 'center',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {transition.label}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Modals ── */}

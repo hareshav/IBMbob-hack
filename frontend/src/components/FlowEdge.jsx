@@ -45,7 +45,7 @@ export const FlowEdge = memo(function FlowEdge({
   selected,
   markerEnd,
 }) {
-  /* Fan-in vertical spread — keeps convergent edges from stacking on top of each other.
+  /* Fan-in vertical spread: keeps convergent edges from stacking on top of each other.
      targetYOffset is pre-computed per-edge in applyGraphPayload based on fan-in count. */
   const tYOff = data?.targetYOffset ?? 0;
 

@@ -172,7 +172,7 @@ export default function CanvasSearch({ nodes, isOpen, onClose, onPick }) {
               fontFamily: "'JetBrains Mono', monospace",
               borderTop: '1px solid var(--border-subtle)',
             }}>
-              +{matches.length - 10} more — refine your query
+              +{matches.length - 10} more: refine your query
             </div>
           )}
         </div>

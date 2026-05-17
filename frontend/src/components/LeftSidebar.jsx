@@ -116,7 +116,7 @@ export default function LeftSidebar({
           )}
         </div>
 
-        {/* Graph Controls — visual node CRUD (always visible; manipulates the graph only) */}
+        {/* Graph Controls: visual node CRUD (always visible; manipulates the graph only) */}
         {(
           <div style={{ marginBottom: 10 }}>
             <div style={{ display: 'flex', gap: 5, marginBottom: 5 }}>

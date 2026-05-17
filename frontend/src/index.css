@@ -7,7 +7,7 @@
    ================================================================ */
 
 :root {
-  /* Dark theme — deep midnight violet, not black */
+  /* Dark theme: deep midnight violet, not black */
   --bg-base:     #07061C;
   --bg-surface:  #0C0B26;
   --bg-card:     #11102E;
@@ -271,7 +271,7 @@ body {
 }
 
 /* ================================================================
-   REACT FLOW OVERRIDES — CRITICAL: No transforms on hover/select
+   REACT FLOW OVERRIDES: CRITICAL: No transforms on hover/select
    that would cause node position instability.
    Only shadow and border changes are safe.
    ================================================================ */
@@ -282,9 +282,9 @@ body {
 .react-flow__pane          { cursor: grab !important; }
 .react-flow__pane.dragging { cursor: grabbing !important; }
 
-/* Node — NO transform, NO animation on hover/select */
+/* Node: NO transform, NO animation on hover/select */
 .react-flow__node {
-  /* No transition on transform — prevents layout shifts */
+  /* No transition on transform: prevents layout shifts */
   will-change: box-shadow, border-color;
 }
 .react-flow__node:hover {
@@ -293,10 +293,10 @@ body {
 }
 .react-flow__node.selected {
   z-index: 20 !important;
-  /* NO animation: nodePop — causes layout shifts */
+  /* NO animation: nodePop: causes layout shifts */
 }
 
-/* Connected-node glitter glow — color-cycling box-shadow animation */
+/* Connected-node glitter glow: color-cycling box-shadow animation */
 .node-connected-glow {
   animation: connectedGlitter 2.4s ease-in-out infinite;
 }
@@ -374,7 +374,7 @@ body {
   fill: rgba(238, 237, 248, 0.65) !important;
 }
 
-/* Built-in controls (hidden — we use our own) */
+/* Built-in controls (hidden: we use our own) */
 .react-flow__controls { display: none !important; }
 
 /* Selection */
@@ -421,7 +421,7 @@ pre, code, .mono {
   pointer-events: none;
 }
 
-/* Dark mode canvas — vivid midnight nebula */
+/* Dark mode canvas: vivid midnight nebula */
 [data-theme="dark"] .canvas-workspace,
 .canvas-workspace {
   background:
@@ -433,7 +433,7 @@ pre, code, .mono {
     #06051A;
 }
 
-/* Light mode canvas — same vivid color zones as dark, over a light lavender base */
+/* Light mode canvas: same vivid color zones as dark, over a light lavender base */
 [data-theme="light"] .canvas-workspace {
   background:
     radial-gradient(ellipse 80% 60% at 10% 15%,  rgba(79,142,247,0.42)  0%, transparent 55%),
@@ -486,7 +486,7 @@ pre, code, .mono {
 [data-tooltip]:hover::after { opacity: 1; }
 
 /* ================================================================
-   HERO — DOT GRID
+   HERO: DOT GRID
    ================================================================ */
 
 .hero-dot-grid {
@@ -557,7 +557,7 @@ pre, code, .mono {
   to { stroke-dashoffset: -20; }
 }
 
-/* Node focus burst rings — two ripples radiate outward on selection */
+/* Node focus burst rings: two ripples radiate outward on selection */
 @keyframes focusBurst {
   0%   { transform: scale(1);    opacity: 1; }
   100% { transform: scale(1.55); opacity: 0; }
@@ -584,6 +584,43 @@ pre, code, .mono {
   0%, 100% { box-shadow: 0 0 0 1.5px rgba(79,142,247,0.60),  0 0 18px 3px rgba(79,142,247,0.30),  0 0 40px 10px rgba(79,142,247,0.10),  inset 0 1px 0 rgba(255,255,255,0.07); }
   33%       { box-shadow: 0 0 0 1.5px rgba(124,127,245,0.65), 0 0 22px 4px rgba(124,127,245,0.32), 0 0 44px 12px rgba(124,127,245,0.12), inset 0 1px 0 rgba(255,255,255,0.07); }
   66%       { box-shadow: 0 0 0 1.5px rgba(176,110,247,0.60), 0 0 20px 3px rgba(176,110,247,0.28), 0 0 42px 10px rgba(176,110,247,0.10), inset 0 1px 0 rgba(255,255,255,0.07); }
+}
+
+/* Portal transition: used when opening/closing a module so the user sees
+   what is unfolding instead of an unexplained camera jolt. */
+@keyframes portalDim {
+  0%   { opacity: 0; }
+  20%  { opacity: 1; }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes portalRing {
+  0%   { opacity: 0; transform: scale(0.35); }
+  20%  { opacity: 1; }
+  100% { opacity: 0; transform: scale(6); }
+}
+
+@keyframes portalLabel {
+  0%   { opacity: 0; transform: translate(-50%, -30%) scale(0.85); filter: blur(4px); }
+  18%  { opacity: 1; transform: translate(-50%, -50%) scale(1);    filter: blur(0); }
+  72%  { opacity: 1; transform: translate(-50%, -55%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -70%) scale(0.96); }
+}
+
+/* Staggered fade-in for newly-revealed nodes after a module opens.
+   Applied via React Flow node className; uses translate-Y so nodes
+   feel like they're rising into place rather than blinking on. */
+@keyframes nodeAppear {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+/* The Chat-with-Bob hero CTA breathes a soft halo so a glancing judge can't
+   miss it. Pulses the box-shadow only; the button itself stays still. */
+@keyframes chatBobPulse {
+  0%, 100% { box-shadow: 0 4px 18px rgba(124,127,245,0.45), 0 0 0 1px rgba(255,255,255,0.10) inset; }
+  50%      { box-shadow: 0 4px 22px rgba(124,127,245,0.70), 0 0 0 3px rgba(124,127,245,0.15), 0 0 0 1px rgba(255,255,255,0.12) inset; }
 }
 
 /* ================================================================

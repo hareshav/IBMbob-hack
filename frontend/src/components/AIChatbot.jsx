@@ -5,7 +5,7 @@ export default function AIChatbot({ isOpen, onClose, context, selectedModelId })
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
-      content: 'Hi! Ask me anything about your workspace — API architecture, refactoring, endpoint design, and more.',
+      content: 'Hi! Ask me anything about your workspace: API architecture, refactoring, endpoint design, and more.',
     },
   ]);
   const [inputMessage, setInputMessage] = useState('');
@@ -110,10 +110,10 @@ export default function AIChatbot({ isOpen, onClose, context, selectedModelId })
             </div>
             <div>
               <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', margin: 0, lineHeight: 1.2 }}>
-                Api-Architect Assistant
+                Chat with Bob
               </h2>
               <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '2px 0 0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                AI-powered · IBM Granite
+                Your AI dev partner
               </p>
             </div>
           </div>

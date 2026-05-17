@@ -185,7 +185,7 @@ export default function NodeChat({ node, selectedModelId, onClose }) {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Quick prompts — only when empty */}
+      {/* Quick prompts: only when empty */}
       {empty && (
         <div style={{ padding: '0 10px 8px', display: 'flex', flexWrap: 'wrap', gap: 4, flexShrink: 0 }}>
           {prompts.map((p, i) => (

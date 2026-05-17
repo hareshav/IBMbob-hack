@@ -260,7 +260,7 @@ export default function CodeSidebar({
               fontSize: 10.5, color: '#FCA5A5',
               fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.55,
             }}>
-              {e.file}:{e.line}:{e.column} — {e.message}
+              {e.file}:{e.line}:{e.column}: {e.message}
             </div>
           ))}
         </div>

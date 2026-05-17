@@ -83,3 +83,28 @@ export async function requestAIGraph(path, modelId) {
   });
   return parseResponse(response);
 }
+
+/* ── Router/function source-file CRUD (local-mode only on the UI side) ── */
+
+export async function deleteFunctionFromSource(functionId) {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/function/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ function_id: functionId }),
+  });
+  return parseResponse(response);
+}
+
+export async function createRouterFile({ relativePath, routerName, prefix, tag }) {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/router/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      relative_path: relativePath,
+      router_name: routerName || undefined,
+      prefix: prefix || '',
+      tag: tag || undefined,
+    }),
+  });
+  return parseResponse(response);
+}

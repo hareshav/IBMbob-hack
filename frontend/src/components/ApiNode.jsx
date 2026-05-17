@@ -1,5 +1,6 @@
 import { useState, useEffect, memo, useContext } from 'react';
 import { Handle, Position } from '@xyflow/react';
+import { ChevronDown, Layers, FileCode2, ArrowRight, AlertTriangle } from 'lucide-react';
 import { GraphCtx } from '../lib/graphContext';
 
 const KIND = {
@@ -64,6 +65,267 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
   const [showBurst, setShowBurst] = useState(false);
   const { connectedNodeIds, hasSelection } = useContext(GraphCtx);
   const isConnected = !selected && connectedNodeIds.has(id);
+
+  /* ── External-module stub (boundary marker in expanded view) ── */
+  if (data?.kind === 'external') {
+    const color = '#7C7FF5';
+    const isDimmed = hasSelection && !selected && !connectedNodeIds.has(id);
+    return (
+      <div
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          position: 'relative',
+          minWidth: 170, maxWidth: 210,
+          background: `linear-gradient(135deg, ${color}0F 0%, var(--bg-card) 70%)`,
+          border: `1.5px dashed ${selected ? color : hovered ? `${color}AA` : `${color}55`}`,
+          borderRadius: 12,
+          padding: '8px 12px',
+          boxShadow: selected
+            ? `0 0 0 3px ${color}33, 0 6px 22px rgba(0,0,0,0.55)`
+            : hovered
+              ? `0 5px 18px rgba(0,0,0,0.45), 0 0 12px ${color}33`
+              : '0 2px 10px rgba(0,0,0,0.4)',
+          opacity: isDimmed ? 0.32 : 1,
+          cursor: 'pointer',
+          transition: 'box-shadow 160ms ease, border-color 160ms ease, opacity 320ms ease',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <div style={{
+            width: 22, height: 22, borderRadius: 6,
+            background: `${color}1F`,
+            border: `1px solid ${color}55`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <FileCode2 size={11} color={color} strokeWidth={2.1} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 7, fontWeight: 700, color,
+              textTransform: 'uppercase', letterSpacing: '0.14em',
+              fontFamily: "'JetBrains Mono', monospace", lineHeight: 1, marginBottom: 2,
+            }}>
+              EXTERNAL
+            </div>
+            <div style={{
+              fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)',
+              fontFamily: "'JetBrains Mono', monospace",
+              lineHeight: 1.3,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {data.label || 'external'}
+            </div>
+          </div>
+          <ArrowRight size={11} color={color} strokeWidth={2.2} style={{ flexShrink: 0 }} />
+        </div>
+        <Handle type="target" position={Position.Left} isConnectable={isConnectable}
+          style={{ width: 8, height: 8, background: color,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', left: -4 }} />
+        <Handle type="source" position={Position.Right} isConnectable={isConnectable}
+          style={{ width: 8, height: 8, background: color,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', right: -4 }} />
+      </div>
+    );
+  }
+
+  /* ── Module node (file-level aggregate) — large card showing per-file summary ── */
+  if (data?.kind === 'module') {
+    const primary = data.primaryGroup ? (GROUP_COLORS[data.primaryGroup] || '#4F8EF7') : '#4F8EF7';
+    const c = data.counts || {};
+    const isDimmed = hasSelection && !selected && !connectedNodeIds.has(id);
+    return (
+      <div
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          position: 'relative',
+          minWidth: 240, maxWidth: 280,
+          background: `linear-gradient(135deg, ${primary}1A 0%, var(--bg-card) 60%)`,
+          border: `1.5px solid ${selected ? primary : hovered ? `${primary}88` : `${primary}44`}`,
+          borderRadius: 14,
+          padding: '12px 14px 11px',
+          boxShadow: selected
+            ? `0 0 0 3px ${primary}33, 0 10px 32px rgba(0,0,0,0.6)`
+            : hovered
+              ? `0 8px 26px rgba(0,0,0,0.55), 0 0 18px ${primary}33`
+              : '0 3px 14px rgba(0,0,0,0.45)',
+          opacity: isDimmed ? 0.32 : 1,
+          transition: 'box-shadow 180ms ease, border-color 180ms ease, opacity 320ms ease, transform 180ms ease',
+          transform: hovered && !selected ? 'translateY(-1px)' : 'translateY(0)',
+          cursor: 'pointer',
+        }}
+      >
+        {/* Top accent ribbon */}
+        <div style={{
+          position: 'absolute', top: 0, left: 12, right: 12, height: 2,
+          borderRadius: '0 0 2px 2px',
+          background: `linear-gradient(90deg, ${primary}, ${primary}66 70%, transparent)`,
+          opacity: selected || hovered ? 1 : 0.7,
+        }} />
+
+        {/* Header: icon + file path */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginBottom: 9 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 8,
+            background: `${primary}1F`,
+            border: `1px solid ${primary}55`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <FileCode2 size={14} color={primary} strokeWidth={2.1} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 7.5, fontWeight: 700, color: primary,
+              textTransform: 'uppercase', letterSpacing: '0.14em',
+              fontFamily: "'JetBrains Mono', monospace", lineHeight: 1, marginBottom: 3,
+            }}>
+              MODULE
+            </div>
+            <div style={{
+              fontSize: 13.5, fontWeight: 700, color: 'var(--text-primary)',
+              fontFamily: "'JetBrains Mono', monospace",
+              lineHeight: 1.3,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {data.label || 'unknown'}
+            </div>
+          </div>
+          {data.hasRisk && (
+            <AlertTriangle size={12} color="#F56565" strokeWidth={2.2} style={{ flexShrink: 0, marginTop: 2 }} />
+          )}
+        </div>
+
+        {/* Kind breakdown chips */}
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 4,
+          paddingTop: 8,
+          borderTop: `1px solid ${primary}25`,
+        }}>
+          {c.input > 0 && <KindChip color="#2ED8F0" label="route" n={c.input} />}
+          {c.function > 0 && <KindChip color="#B06EF7" label="fn" n={c.function} />}
+          {c.router > 0 && <KindChip color="#4F8EF7" label="rtr" n={c.router} />}
+          {c.output > 0 && <KindChip color="#1AE0A0" label="out" n={c.output} />}
+        </div>
+
+        {/* Footer hint */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginTop: 8, paddingTop: 7,
+          borderTop: '1px dashed var(--border-subtle)',
+        }}>
+          <span style={{
+            fontSize: 9, color: 'var(--text-muted)',
+            fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            {data.count} item{data.count === 1 ? '' : 's'}
+          </span>
+          <span style={{
+            display: 'flex', alignItems: 'center', gap: 3,
+            fontSize: 9, fontWeight: 600, color: primary,
+            fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            open <ArrowRight size={9} strokeWidth={2.4} />
+          </span>
+        </div>
+
+        <Handle type="target" position={Position.Left} isConnectable={isConnectable}
+          style={{ width: 10, height: 10, background: primary,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', left: -5 }} />
+        <Handle type="source" position={Position.Right} isConnectable={isConnectable}
+          style={{ width: 10, height: 10, background: primary,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', right: -5 }} />
+      </div>
+    );
+  }
+
+  /* ── Group supernode (collapsed group) — distinct compact render ── */
+  if (data?.kind === 'group') {
+    const groupColor = GROUP_COLORS[data.group] || '#7C7F9A';
+    const title = data.title || data.group || 'Group';
+    return (
+      <div
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          position: 'relative',
+          minWidth: 180,
+          maxWidth: 220,
+          background: `linear-gradient(145deg, ${groupColor}22 0%, ${groupColor}08 100%), var(--bg-card)`,
+          border: `1.5px dashed ${selected ? groupColor : hovered ? `${groupColor}99` : `${groupColor}55`}`,
+          borderRadius: 14,
+          padding: '11px 14px',
+          boxShadow: selected
+            ? `0 0 0 3px ${groupColor}33, 0 8px 26px rgba(0,0,0,0.55)`
+            : hovered
+              ? `0 6px 22px rgba(0,0,0,0.5), 0 0 12px ${groupColor}44`
+              : '0 2px 10px rgba(0,0,0,0.4)',
+          opacity: hasSelection && !selected && !connectedNodeIds.has(id) ? 0.32 : 1,
+          transition: 'box-shadow 160ms ease, border-color 160ms ease, opacity 320ms ease',
+          cursor: 'pointer',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <div style={{
+            width: 22, height: 22, borderRadius: 6,
+            background: `${groupColor}22`,
+            border: `1px solid ${groupColor}55`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Layers size={11} color={groupColor} strokeWidth={2.2} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 7.5, fontWeight: 700, color: groupColor,
+              textTransform: 'uppercase', letterSpacing: '0.14em',
+              fontFamily: "'JetBrains Mono', monospace", lineHeight: 1,
+            }}>
+              GROUP
+            </div>
+            <div style={{
+              fontSize: 13, fontWeight: 700, color: 'var(--text-primary)',
+              fontFamily: "'JetBrains Mono', monospace",
+              lineHeight: 1.3, marginTop: 2,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {title}
+            </div>
+          </div>
+          <ChevronDown size={13} color={groupColor} strokeWidth={2.2} style={{ flexShrink: 0 }} />
+        </div>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          paddingTop: 6,
+          borderTop: `1px dashed ${groupColor}30`,
+        }}>
+          <span style={{
+            fontSize: 10, fontWeight: 600, color: groupColor,
+            fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            {data.count} fn
+          </span>
+          <span style={{ flex: 1 }} />
+          <span style={{
+            fontSize: 9, color: 'var(--text-muted)',
+            fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            click to expand
+          </span>
+        </div>
+
+        <Handle type="target" position={Position.Left} isConnectable={isConnectable}
+          style={{ width: 9, height: 9, background: groupColor,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', left: -5 }} />
+        <Handle type="source" position={Position.Right} isConnectable={isConnectable}
+          style={{ width: 9, height: 9, background: groupColor,
+                   border: '2px solid var(--bg-card)', borderRadius: '50%', right: -5 }} />
+      </div>
+    );
+  }
 
   /* Trigger ripple burst whenever this node becomes selected */
   useEffect(() => {
@@ -286,3 +548,19 @@ export const ApiNode = memo(function ApiNode({ id, data, selected, isConnectable
     </div>
   );
 });
+
+function KindChip({ color, label, n }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '2px 7px', borderRadius: 100,
+      background: `${color}15`,
+      border: `1px solid ${color}30`,
+      fontSize: 9, fontWeight: 600, color,
+      fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.2,
+    }}>
+      <span style={{ width: 4, height: 4, borderRadius: '50%', background: color, boxShadow: `0 0 4px ${color}` }} />
+      {n} {label}
+    </span>
+  );
+}

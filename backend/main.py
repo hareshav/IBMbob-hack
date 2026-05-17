@@ -166,6 +166,17 @@ class FunctionSavePayload(BaseModel):
     content: str
 
 
+class FunctionDeletePayload(BaseModel):
+    function_id: str
+
+
+class RouterCreatePayload(BaseModel):
+    relative_path: str
+    router_name: Optional[str] = None
+    prefix: Optional[str] = ""
+    tag: Optional[str] = None
+
+
 class AgentExecutionPayload(BaseModel):
     target_file: str = Field(..., description="Primary file path to inspect first.")
     change_request: str = Field(..., description="Architecture/code change request.")
@@ -211,11 +222,28 @@ def _validate_workspace_path(path_value: str) -> Path:
 
 
 def _validate_main_file_path(path_value: str) -> Path:
-    main_file = Path(path_value).resolve()
+    raw = (path_value or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="No path provided.")
+    main_file = Path(raw).expanduser().resolve()
     if not main_file.exists():
-        raise HTTPException(status_code=400, detail="File path does not exist!")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File path does not exist: {main_file}",
+        )
+    if main_file.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Path is a directory, not a file: {main_file}. "
+                "Point at the project's main Python file (e.g. backend/app/main.py)."
+            ),
+        )
     if not main_file.is_file():
-        raise HTTPException(status_code=400, detail="Provided path is not a file!")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Path is not a regular file: {main_file}",
+        )
     return main_file
 
 
@@ -899,6 +927,14 @@ def _build_workspace_graph(workspace_path: str, main_file_path: Optional[str] = 
     if not visible_fns:
         visible_fns = set(functions.keys())
 
+    # Force every endpoint's direct handler into visible_fns so input nodes are never detached.
+    # The BFS misses handlers whose functions couldn't be resolved (e.g. cross-file refs).
+    for ep in endpoints:
+        root = ep["root_function_id"]
+        if root in functions and root not in visible_fns:
+            visible_fns.add(root)
+            layers[root] = 1  # Place immediately after inputs (layer 1)
+
     for fid in visible_fns:
         layers.setdefault(fid, max_layer + 1)
 
@@ -1289,6 +1325,154 @@ async def save_function_content(payload: FunctionSavePayload) -> Dict[str, Any]:
         except HTTPException as error:
             response["graph_error"] = error.detail
 
+    return response
+
+
+@app.post("/api/function/delete")
+async def delete_function(payload: FunctionDeletePayload) -> Dict[str, Any]:
+    """Remove a function (and its leading decorators) from its source file."""
+    global CURRENT_GRAPH_FILES
+
+    if not CURRENT_WORKSPACE_PATH:
+        raise HTTPException(status_code=400, detail="A workspace path must be connected first.")
+
+    workspace_root = Path(CURRENT_WORKSPACE_PATH).resolve()
+    relative_file, function_name = _parse_function_id(payload.function_id)
+    target = _resolve_requested_file(relative_file, workspace_root, must_exist=True)
+
+    try:
+        source = target.read_text(encoding="utf-8")
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {error}") from error
+
+    # Find function range — AST first (it knows decorators), fallback to text.
+    start_index: Optional[int] = None
+    end_index: Optional[int] = None
+
+    try:
+        tree = ast.parse(source, filename=str(target))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+                # Include decorators that precede the def
+                deco_start = min(
+                    [getattr(d, "lineno", node.lineno) for d in node.decorator_list] or [node.lineno]
+                )
+                start_index = max(deco_start - 1, 0)
+                end_index = max(getattr(node, "end_lineno", start_index + 1), start_index + 1)
+                break
+    except SyntaxError:
+        pass
+
+    if start_index is None or end_index is None:
+        text_range = _locate_function_range_by_text(source, function_name)
+        if text_range is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Function '{function_name}' was not found in {relative_file}.",
+            )
+        start_index, end_index = text_range
+
+    original_lines = source.splitlines(keepends=True)
+    # Also swallow one trailing blank line if present (keeps the file tidy)
+    drop_end = end_index
+    if drop_end < len(original_lines) and original_lines[drop_end].strip() == "":
+        drop_end += 1
+
+    updated_source = "".join([*original_lines[:start_index], *original_lines[drop_end:]])
+
+    try:
+        target.write_text(updated_source, encoding="utf-8")
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {error}") from error
+
+    files_for_validation = _current_graph_files_for_validation(workspace_root)
+    if target.resolve() not in {p.resolve() for p in files_for_validation}:
+        files_for_validation.append(target.resolve())
+    syntax_errors = _collect_syntax_errors(files_for_validation, workspace_root)
+
+    response: Dict[str, Any] = {
+        "status": "deleted",
+        "function_id": payload.function_id,
+        "relative_path": _safe_relative(target, workspace_root),
+        "has_syntax_errors": bool(syntax_errors),
+        "syntax_errors": syntax_errors,
+    }
+    if not syntax_errors:
+        try:
+            graph_payload = _build_workspace_graph(
+                workspace_path=CURRENT_WORKSPACE_PATH,
+                main_file_path=CURRENT_MAIN_FILE_PATH or None,
+            )
+            CURRENT_GRAPH_FILES = graph_payload.get("source_files", [])
+            response["graph"] = graph_payload
+        except HTTPException as error:
+            response["graph_error"] = error.detail
+    return response
+
+
+_ROUTER_SCAFFOLD = '''from fastapi import APIRouter
+
+router = APIRouter({init_args})
+
+{tag_comment}# Define your routes below. Example:
+#
+# @router.get("/")
+# def list_items():
+#     return {{"items": []}}
+'''
+
+
+@app.post("/api/router/create")
+async def create_router_file(payload: RouterCreatePayload) -> Dict[str, Any]:
+    """Scaffold a new FastAPI APIRouter file inside the connected workspace."""
+    global CURRENT_GRAPH_FILES
+
+    if not CURRENT_WORKSPACE_PATH:
+        raise HTTPException(status_code=400, detail="A workspace path must be connected first.")
+
+    workspace_root = Path(CURRENT_WORKSPACE_PATH).resolve()
+    relative = (payload.relative_path or "").strip().lstrip("/\\")
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path is required.")
+    if not relative.endswith(".py"):
+        relative += ".py"
+
+    target = (workspace_root / relative).resolve()
+    if not target.is_relative_to(workspace_root):
+        raise HTTPException(status_code=400, detail="Path must stay inside the workspace.")
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"File already exists: {relative}")
+
+    init_parts: List[str] = []
+    if payload.prefix:
+        init_parts.append(f'prefix="{payload.prefix}"')
+    if payload.tag:
+        init_parts.append(f'tags=["{payload.tag}"]')
+    init_args = ", ".join(init_parts)
+    tag_comment = f"# Router scaffold: {payload.router_name}\n" if payload.router_name else ""
+
+    contents = _ROUTER_SCAFFOLD.format(init_args=init_args, tag_comment=tag_comment)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {error}") from error
+
+    response: Dict[str, Any] = {
+        "status": "created",
+        "relative_path": _safe_relative(target, workspace_root),
+        "absolute_path": str(target),
+    }
+    try:
+        graph_payload = _build_workspace_graph(
+            workspace_path=CURRENT_WORKSPACE_PATH,
+            main_file_path=CURRENT_MAIN_FILE_PATH or None,
+        )
+        CURRENT_GRAPH_FILES = graph_payload.get("source_files", [])
+        response["graph"] = graph_payload
+    except HTTPException as error:
+        response["graph_error"] = error.detail
     return response
 
 

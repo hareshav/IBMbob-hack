@@ -2,21 +2,29 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background, MiniMap, ReactFlow,
   addEdge, useEdgesState, useNodesState,
+  MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ZoomIn, ZoomOut, Maximize2, RotateCcw } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize2, RotateCcw, ArrowLeft, Layers } from 'lucide-react';
 
 import WorkspaceNavbar from './components/WorkspaceNavbar';
 import LeftSidebar from './components/LeftSidebar';
 import CodeSidebar from './components/CodeSidebar';
 import NodeChat from './components/NodeChat';
 import { ApiNode } from './components/ApiNode';
+import { FlowEdge } from './components/FlowEdge';
 import AIChatbot from './components/AIChatbot';
 import AIGenerateEndpoint from './components/AIGenerateEndpoint';
 import AIRefactorFunction from './components/AIRefactorFunction';
-import { fetchModelCatalog, loadMainFileGraph, saveFunctionContent, requestAIGraph } from './lib/apiClient';
+import CanvasSearch from './components/CanvasSearch';
+import CanvasLegend from './components/CanvasLegend';
+import GroupsPanel from './components/GroupsPanel';
+import { fetchModelCatalog, loadMainFileGraph, saveFunctionContent, requestAIGraph,
+         deleteFunctionFromSource, createRouterFile } from './lib/apiClient';
 import { GraphCtx } from './lib/graphContext';
 import { applyDagreLayout } from './lib/dagreLayout';
+import { collapseGroups, distinctGroups, isSupernodeId } from './lib/groupCollapse';
+import { aggregateByModule, extractModuleNodes, isModuleNodeId } from './lib/moduleAggregation';
 
 /* ── Model list ── */
 const FALLBACK_MODELS = [
@@ -26,8 +34,18 @@ const FALLBACK_MODELS = [
   'mistralai/mistral-medium-2505', 'openai/gpt-oss-120b',
 ];
 
-/* ── Custom node type registration (useMemo inside component) ── */
+/* ── Custom node/edge types — defined outside component so refs are stable ── */
 const NODE_TYPES = { api: ApiNode };
+const EDGE_TYPES = { flow: FlowEdge };
+
+/* ── Edge type → color (kept in sync with FlowEdge's EDGE_CFG) ── */
+const EDGE_COLOR = { api: '#2ED8F0', call: '#7C7FF5', default: '#4F8EF7' };
+const arrowFor = (eType) => ({
+  type: MarkerType.ArrowClosed,
+  color: EDGE_COLOR[eType] || EDGE_COLOR.default,
+  width: 16,
+  height: 16,
+});
 
 /* ── Atmospheric canvas background — vivid colored orbs ── */
 function AtmosphericBg({ theme }) {
@@ -316,6 +334,20 @@ export default function IbmBobApiArchitectCanvas({
   const nodeIdCounter = useRef(1);
   const rfInstanceRef = useRef(null);
 
+  /* Raw graph (pre-collapse, pre-layout). Manual nodes/edges are appended here too. */
+  const rawNodesRef = useRef([]);
+  const rawEdgesRef = useRef([]);
+
+  /* Group collapse state */
+  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set());
+  const [availableGroups, setAvailableGroups] = useState([]); // [{group, count}]
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  /* Two-tier view: 'modules' shows one node per file; 'expanded' drills into one module */
+  const [viewMode, setViewMode] = useState('modules');         // 'modules' | 'expanded'
+  const [expandedModuleId, setExpandedModuleId] = useState(null);
+  const [isTransitioning, setIsTransitioning] = useState(false); // for fade animation
+
   const [mainFilePath, setMainFilePath] = useState(initialPath);
   const [newNodeLabel, setNewNodeLabel] = useState('Router Node');
   const [newNodeKind,  setNewNodeKind]  = useState('router');
@@ -332,7 +364,7 @@ export default function IbmBobApiArchitectCanvas({
   const [syntaxErrors, setSyntaxErrors]       = useState([]);
   const [isLoadingGraph, setIsLoadingGraph]   = useState(false);
   const [isSaving, setIsSaving]               = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [isNodeChatOpen, setIsNodeChatOpen]   = useState(false);
 
   /* track when we need a post-render fitView */
@@ -410,62 +442,214 @@ export default function IbmBobApiArchitectCanvas({
     return { x: 100 + (idx % 4) * 260, y: 100 + Math.floor(idx / 4) * 140 };
   }, [nodes.length, selectedNode]);
 
-  const onConnect = useCallback(
-    (conn) => setEdges((cur) => addEdge({
-      ...conn, animated: true, type: 'default',
-      style: { stroke: '#7C7FF5', strokeWidth: 1.8, opacity: 0.85 },
-    }, cur)),
-    [setEdges],
-  );
+  const onConnect = useCallback((conn) => {
+    const newEdge = {
+      ...conn, type: 'flow', animated: false,
+      data: { edge_type: 'call' },
+      markerEnd: arrowFor('call'),
+    };
+    rawEdgesRef.current = [...(rawEdgesRef.current || []), newEdge];
+    setEdges((cur) => addEdge(newEdge, cur));
+  }, [setEdges]);
 
-  /* ── Add node ── */
+  /* ── Add node — kept in both raw and display so collapse re-derivation preserves it ── */
   const addManualNode = useCallback((reqKind, reqLabel) => {
     const kind  = reqKind ?? newNodeKind;
     const label = (reqLabel ?? newNodeLabel).trim() || (kind === 'router' ? 'Express Router' : 'New Node');
     const n     = createManualNode(kind, label);
-    setNodes((cur) => [...cur, {
+    const newNode = {
       id: `manual-${Date.now()}-${nodeIdCounter.current++}`,
       type: n.type, position: getPosition(), data: n.data, style: n.style,
-    }]);
+    };
+    rawNodesRef.current = [...(rawNodesRef.current || []), newNode];
+    setNodes((cur) => [...cur, newNode]);
     setStatus(`Added ${kind} node: ${label}`);
   }, [createManualNode, getPosition, newNodeKind, newNodeLabel, setNodes]);
 
   const addQuickRouter = useCallback(() => addManualNode('router', 'Express Router'), [addManualNode]);
 
-  /* ── Delete node ── */
-  const deleteSelectedNode = useCallback(() => {
-    if (!selectedNode?.id) return;
-    const id = selectedNode.id;
+  /* ── Visual-only node removal (used as fallback or in github mode) ── */
+  /* ── Recompute displayed nodes/edges from rawNodesRef + rawEdgesRef + view state.
+       Pipeline: viewMode branch (module aggregate OR module extract) → optional group collapse
+                 → fan-in/spread bookkeeping → dagre. ── */
+  const recomputeDisplay = useCallback((opts = {}) => {
+    const { keepSelectionId } = opts;
+    const rawN = rawNodesRef.current || [];
+    const rawE = rawEdgesRef.current || [];
+
+    /* Step 1: viewMode-aware base graph */
+    let cNodes, cEdges;
+    if (viewMode === 'modules') {
+      const agg = aggregateByModule(rawN, rawE);
+      cNodes = agg.nodes; cEdges = agg.edges;
+      /* Add markerEnd to aggregated edges (since we built them fresh, not via applyGraphPayload) */
+      cEdges = cEdges.map((e) => ({ ...e, markerEnd: arrowFor(e.data?.edge_type) }));
+    } else if (viewMode === 'expanded' && expandedModuleId) {
+      const ext = extractModuleNodes(rawN, rawE, expandedModuleId);
+      const collapsed = collapseGroups(ext.nodes, ext.edges, collapsedGroups);
+      cNodes = collapsed.nodes; cEdges = collapsed.edges;
+    } else {
+      cNodes = rawN; cEdges = rawE;
+    }
+
+    /* Step 2: per-target fan-in count for opacity in dense bundles */
+    const fanInCount = {};
+    cEdges.forEach((e) => { fanInCount[e.target] = (fanInCount[e.target] || 0) + 1; });
+
+    /* Step 3: per-edge vertical spread so convergent edges don't overlap */
+    const targetBuckets = {};
+    cEdges.forEach((e, i) => {
+      if (!targetBuckets[e.target]) targetBuckets[e.target] = [];
+      targetBuckets[e.target].push(i);
+    });
+
+    const gEdges = cEdges.map((e, i) => {
+      const bucket = targetBuckets[e.target];
+      const n = bucket ? bucket.length : 1;
+      const pos = bucket ? bucket.indexOf(i) : 0;
+      const spread = n > 1 ? Math.min((n - 1) * 16, 80) : 0;
+      const tYOff = n > 1 ? -spread / 2 + pos * (spread / (n - 1)) : 0;
+      return {
+        ...e,
+        data: {
+          ...e.data,
+          targetYOffset: Math.round(tYOff),
+          fanInCount: fanInCount[e.target] || 1,
+        },
+      };
+    });
+
+    const gNodes = applyDagreLayout(cNodes, gEdges);
+    setNodes(gNodes);
+    setEdges(gEdges);
+
+    /* Retain selection where possible; otherwise clear (don't auto-select an arbitrary node) */
+    setSelectedNode((cur) => {
+      const targetId = keepSelectionId ?? cur?.id;
+      if (targetId) {
+        const retained = gNodes.find((n) => n.id === targetId);
+        if (retained) return retained;
+      }
+      return null;
+    });
+  }, [collapsedGroups, viewMode, expandedModuleId, setEdges, setNodes]);
+
+  /* ── Apply graph payload: normalises into raw, then recomputes display ── */
+  const applyGraphPayload = useCallback((payload, nextStatus) => {
+    const rawNodes = normalizeNodes(payload?.nodes || []);
+
+    /* Wrap each edge as a FlowEdge with markerEnd matching its type */
+    const rawEdges = (payload?.edges || []).map((e) => {
+      const eType = e.data?.edge_type || 'call';
+      return {
+        ...e,
+        type: 'flow',
+        animated: false,
+        data: { ...(e.data || {}), edge_type: eType },
+        markerEnd: arrowFor(eType),
+      };
+    });
+
+    rawNodesRef.current = rawNodes;
+    rawEdgesRef.current = rawEdges;
+    setAvailableGroups(distinctGroups(rawNodes));
+
+    /* Fresh load: reset to modules view + clear collapses. useEffect will recompute. */
+    const needsReset = viewMode !== 'modules' || expandedModuleId !== null || collapsedGroups.size > 0;
+    if (needsReset) {
+      setCollapsedGroups(new Set());
+      setExpandedModuleId(null);
+      setViewMode('modules');
+    } else {
+      recomputeDisplay();
+    }
+    if (nextStatus) setStatus(nextStatus);
+  }, [normalizeNodes, collapsedGroups, viewMode, expandedModuleId, recomputeDisplay]);
+
+  /* When collapse set or view mode changes, re-derive display */
+  useEffect(() => {
+    if ((rawNodesRef.current || []).length === 0) return;
+    recomputeDisplay();
+  }, [collapsedGroups, viewMode, expandedModuleId, recomputeDisplay]);
+
+  /* ── Visual-only node removal (used as fallback or in github mode) ── */
+  const removeNodeVisualOnly = useCallback((id) => {
+    rawNodesRef.current = (rawNodesRef.current || []).filter((n) => n.id !== id);
+    rawEdgesRef.current = (rawEdgesRef.current || []).filter((e) => e.source !== id && e.target !== id);
     setNodes((cur) => cur.filter((n) => n.id !== id));
     setEdges((cur) => cur.filter((e) => e.source !== id && e.target !== id));
     setSelectedNode(null); setFunctionCode(''); setActiveFunctionId('');
-    setStatus('Node deleted.');
-  }, [selectedNode, setEdges, setNodes]);
+  }, [setEdges, setNodes]);
 
-  /* ── Apply graph payload ── */
-  const applyGraphPayload = useCallback((payload, nextStatus) => {
-    const rawNodes = normalizeNodes(payload?.nodes || []);
-    /* Color edges by edge_type: api=cyan (thick), call=varied (thinner) */
-    const CALL_COLORS = ['#4F8EF7', '#7C7FF5', '#B06EF7', '#1AE0A0'];
-    let callIdx = 0;
-    const gEdges = (payload?.edges || []).map((e) => {
-      const edgeType = e.data?.edge_type;
-      const isApi = edgeType === 'api';
-      const col = isApi ? '#2ED8F0' : CALL_COLORS[callIdx++ % CALL_COLORS.length];
-      return {
-        ...e, animated: true, type: 'default',
-        style: { stroke: col, strokeWidth: isApi ? 2.2 : 1.6, opacity: isApi ? 0.90 : 0.65 },
-      };
-    });
-    /* Apply dagre layout (IBM_BOB-style) to position nodes properly */
-    const gNodes = applyDagreLayout(rawNodes, gEdges);
-    setNodes(gNodes); setEdges(gEdges);
-    setSelectedNode((cur) => {
-      if (cur?.id) { const retained = gNodes.find((n) => n.id === cur.id); if (retained) return retained; }
-      return gNodes[0] || null;
-    });
-    if (nextStatus) setStatus(nextStatus);
-  }, [normalizeNodes, setEdges, setNodes]);
+  /* ── Delete node — in local mode + real node ⇒ actually delete from source ── */
+  const deleteSelectedNode = useCallback(async () => {
+    if (!selectedNode?.id) return;
+    const id = selectedNode.id;
+    if (isSupernodeId(id)) { setStatus('Cannot delete a collapsed group — expand it first.'); return; }
+
+    const isManual = id.startsWith('manual-');
+    const fnId = selectedNode.data?.function_id;
+    const canDeleteFromSource = canEdit && !isManual && fnId;
+
+    if (!canDeleteFromSource) {
+      removeNodeVisualOnly(id);
+      setStatus(isManual ? 'Node deleted (visual).' : 'Node hidden (view-only mode — source not modified).');
+      return;
+    }
+
+    const label = selectedNode.data?.title || selectedNode.data?.label || fnId;
+    if (!window.confirm(`Delete function "${label}" from ${selectedNode.data?.file}?\n\nThis will modify the source file.`)) {
+      return;
+    }
+
+    setStatus(`Deleting ${label} from source…`);
+    try {
+      const result = await deleteFunctionFromSource(fnId);
+      if (result.has_syntax_errors) {
+        setSyntaxErrors(result.syntax_errors || []);
+        setStatus(`Deleted, but file has ${result.syntax_errors?.length || 0} syntax error(s).`);
+      }
+      if (result.graph) {
+        applyGraphPayload(result.graph, `Deleted ${label} from ${result.relative_path}`);
+      } else {
+        removeNodeVisualOnly(id);
+        setStatus(`Deleted ${label} from ${result.relative_path}.`);
+      }
+    } catch (err) {
+      setStatus(`Delete failed: ${err instanceof Error ? err.message : 'error'}`);
+    }
+  }, [selectedNode, canEdit, removeNodeVisualOnly, applyGraphPayload]);
+
+  /* ── Create router — in local mode prompts for a path then writes a real scaffold;
+       in github (view-only) mode falls back to a visual node ── */
+  const createRouter = useCallback(async () => {
+    if (!canEdit) {
+      addManualNode('router', 'Express Router');
+      setStatus('Added router node (visual only — connect a local workspace to write files).');
+      return;
+    }
+    const input = window.prompt(
+      'Create a new router file.\n\nEnter the relative path (e.g. "backend/app/routers/products.py"):',
+      'backend/app/routers/new_router.py',
+    );
+    if (!input || !input.trim()) return;
+    const relativePath = input.trim();
+
+    setStatus(`Creating router ${relativePath}…`);
+    try {
+      const result = await createRouterFile({
+        relativePath,
+        routerName: relativePath.split('/').pop().replace(/\.py$/, ''),
+      });
+      if (result.graph) {
+        applyGraphPayload(result.graph, `Created router file ${result.relative_path}`);
+      } else {
+        setStatus(`Created ${result.relative_path}`);
+      }
+    } catch (err) {
+      setStatus(`Create router failed: ${err instanceof Error ? err.message : 'error'}`);
+    }
+  }, [canEdit, addManualNode, applyGraphPayload]);
 
   /* ── Load graph (AST parser) ── */
   const loadGraph = useCallback(async () => {
@@ -503,12 +687,113 @@ export default function IbmBobApiArchitectCanvas({
     } finally { setIsLoadingGraph(false); }
   }, [applyGraphPayload, mainFilePath, selectedModelId]);
 
+  /* ── Group collapse handlers ── */
+  const toggleGroup = useCallback((group) => {
+    setCollapsedGroups((cur) => {
+      const next = new Set(cur);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  }, []);
+  const collapseAll = useCallback(() => {
+    setCollapsedGroups(new Set(availableGroups.map((g) => g.group)));
+  }, [availableGroups]);
+  const expandAll = useCallback(() => setCollapsedGroups(new Set()), []);
+
+  /* ── Pan/zoom camera to a node — used by both onNodeClick and CanvasSearch ── */
+  const flyToNode = useCallback((node, opts = {}) => {
+    if (!node?.position) return;
+    const { duration = 500, minZoom = 0.85 } = opts;
+    setTimeout(() => {
+      const rf = rfInstanceRef.current;
+      if (!rf) return;
+      rf.setCenter(
+        node.position.x + 110,
+        node.position.y + 55,
+        { duration, zoom: Math.max(rf.getZoom(), minZoom) },
+      );
+    }, 40);
+  }, []);
+
+  /* ── Open a module: cinematic zoom toward the card, fade, then expand ── */
+  const openModule = useCallback((node) => {
+    if (!node?.data?.moduleId) return;
+    fitViewTimers.current.forEach(clearTimeout);
+    fitViewTimers.current = [];
+
+    /* Phase 1: fly camera toward the module card */
+    flyToNode(node, { duration: 520, minZoom: 1.55 });
+    setIsTransitioning(true);
+
+    /* Phase 2: after the fly completes, swap the view to "expanded" */
+    setTimeout(() => {
+      setExpandedModuleId(node.data.moduleId);
+      setViewMode('expanded');
+      setStatus(`Opened module: ${node.data.label || node.data.file}`);
+      /* Phase 3: re-fit to the newly-laid-out subgraph */
+      setTimeout(() => {
+        rfInstanceRef.current?.fitView({ padding: 0.22, duration: 520 });
+        setIsTransitioning(false);
+      }, 260);
+    }, 380);
+  }, [flyToNode]);
+
+  /* ── Close an expanded module: zoom-out fade, then back to overview ── */
+  const closeModule = useCallback(() => {
+    setIsTransitioning(true);
+    /* Pull camera back slightly to telegraph the zoom-out */
+    const rf = rfInstanceRef.current;
+    if (rf) {
+      const cur = rf.getZoom();
+      rf.zoomTo(Math.max(0.6, cur * 0.7), { duration: 320 });
+    }
+    setTimeout(() => {
+      setExpandedModuleId(null);
+      setViewMode('modules');
+      setCollapsedGroups(new Set());
+      setSelectedNode(null);
+      setStatus('Back to modules overview.');
+      setTimeout(() => {
+        rfInstanceRef.current?.fitView({ padding: 0.2, duration: 520 });
+        setIsTransitioning(false);
+      }, 260);
+    }, 320);
+  }, []);
+
   /* ── Node click ── */
   const onNodeClick = useCallback((evt, node) => {
     /* Cancel any auto-fitView pending from graph load — user is interacting now */
     fitViewTimers.current.forEach(clearTimeout);
     fitViewTimers.current = [];
     pendingFitView.current = false;
+
+    /* Module card: cinematic drill-in */
+    if (node?.data?.kind === 'module') {
+      openModule(node);
+      return;
+    }
+
+    /* External-module stub: navigate to that module (swap, don't double-zoom) */
+    if (node?.data?.kind === 'external' && node?.data?.moduleId) {
+      setIsTransitioning(true);
+      setTimeout(() => {
+        setExpandedModuleId(node.data.moduleId);
+        setStatus(`Jumped to module: ${node.data.label || node.data.moduleId}`);
+        setTimeout(() => {
+          rfInstanceRef.current?.fitView({ padding: 0.22, duration: 520 });
+          setIsTransitioning(false);
+        }, 280);
+      }, 180);
+      return;
+    }
+
+    /* Clicking a collapsed-group supernode expands it instead of selecting */
+    if (node?.data?.kind === 'group' && node?.data?.group) {
+      toggleGroup(node.data.group);
+      setStatus(`Expanded group: ${node.data.group}`);
+      return;
+    }
 
     setSelectedNode(node);
 
@@ -529,20 +814,35 @@ export default function IbmBobApiArchitectCanvas({
     setIsNodeChatOpen(true);
 
     /* Always fly camera to the clicked node — longer zoom for direct clicks */
-    if (node?.position) {
-      const duration = evt === null ? 420 : 650;
-      const minZoom  = evt === null ? 0.6  : 0.9;
-      setTimeout(() => {
-        const rf = rfInstanceRef.current;
-        if (!rf) return;
-        rf.setCenter(
-          node.position.x + 110,
-          node.position.y + 55,
-          { duration, zoom: Math.max(rf.getZoom(), minZoom) },
-        );
-      }, 40);
+    flyToNode(node, {
+      duration: evt === null ? 420 : 650,
+      minZoom:  evt === null ? 0.6  : 0.9,
+    });
+  }, [edges, toggleGroup, flyToNode, openModule]);
+
+  /* ── Search → pan & gently highlight the matched node ── */
+  const handlePickSearchResult = useCallback((node) => {
+    if (!node) return;
+    flyToNode(node, { duration: 480, minZoom: 0.9 });
+    setSelectedNode(node);
+
+    /* Sync code drawer / function context (same logic as onNodeClick) */
+    if (node?.data?.kind === 'function') {
+      setFunctionCode(node.data.code || '');
+      setActiveFunctionId(node.data.function_id || '');
+    } else {
+      setFunctionCode('');
+      setActiveFunctionId('');
     }
-  }, [edges]);
+
+    /* Refresh connection halo */
+    const connected = new Set();
+    edges.forEach((e) => {
+      if (e.source === node.id) connected.add(e.target);
+      if (e.target === node.id) connected.add(e.source);
+    });
+    setConnectedNodeIds(connected);
+  }, [edges, flyToNode]);
 
   const deselectNode = useCallback(() => {
     setSelectedNode(null); setFunctionCode(''); setActiveFunctionId('');
@@ -621,6 +921,29 @@ export default function IbmBobApiArchitectCanvas({
   const LOG_MIN = Math.log(0.05);
   const LOG_MAX = Math.log(4);
 
+  /* ── Global hotkeys: "/" opens search, Esc closes search or returns to modules, "F" fits view ── */
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target?.tagName || '').toLowerCase();
+      const inEditable = tag === 'input' || tag === 'textarea' || e.target?.isContentEditable;
+      if (e.key === '/' && !inEditable) {
+        e.preventDefault();
+        setIsSearchOpen(true);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (isSearchOpen) { setIsSearchOpen(false); return; }
+        if (viewMode === 'expanded') { closeModule(); return; }
+      }
+      if ((e.key === 'f' || e.key === 'F') && !inEditable) {
+        e.preventDefault();
+        rfInstanceRef.current?.fitView({ padding: 0.18, duration: 500 });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isSearchOpen, viewMode, closeModule]);
+
   /* ─────────────── RENDER ─────────────── */
   return (
     <div
@@ -648,6 +971,7 @@ export default function IbmBobApiArchitectCanvas({
           nodes={nodes}
           edges={edges}
           nodeTypes={NODE_TYPES}
+          edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -656,10 +980,7 @@ export default function IbmBobApiArchitectCanvas({
           onInit={(instance) => { rfInstanceRef.current = instance; }}
           onViewportChange={handleViewportChange}
           connectionLineStyle={{ stroke: 'rgba(79,142,247,0.6)', strokeWidth: 1.5 }}
-          defaultEdgeOptions={{
-            animated: true, type: 'default',
-            style: { stroke: '#7C7FF5', strokeWidth: 1.8, opacity: 0.8 },
-          }}
+          defaultEdgeOptions={{ type: 'flow', animated: false, data: { edge_type: 'call' }, markerEnd: arrowFor('call') }}
           /* Navigation */
           panOnDrag={true}
           panOnScroll={true}
@@ -794,8 +1115,11 @@ export default function IbmBobApiArchitectCanvas({
           onNewNodeLabelChange={setNewNodeLabel}
           newNodeKind={newNodeKind}
           onNewNodeKindChange={setNewNodeKind}
-          onAddNode={() => addManualNode()}
-          onQuickAddRouter={addQuickRouter}
+          onAddNode={canEdit
+            ? () => setIsGenerateEndpointOpen(true)
+            : () => addManualNode()
+          }
+          onQuickAddRouter={createRouter}
           onDeleteSelectedNode={deleteSelectedNode}
           canEdit={canEdit}
         />
@@ -829,14 +1153,13 @@ export default function IbmBobApiArchitectCanvas({
           modelsError={modelsError}
           onOpenChatbot={() => setIsChatbotOpen(true)}
           onOpenGenerateEndpoint={() => setIsGenerateEndpointOpen(true)}
-          onOpenRefactorFunction={() => setIsRefactorFunctionOpen(true)}
-          hasSelectedNode={Boolean(selectedNode?.id)}
           canEdit={canEdit}
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
           onFitView={handleFitView}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
+          onAddManually={() => setSidebarCollapsed(false)}
         />
       </div>
 
@@ -935,6 +1258,91 @@ export default function IbmBobApiArchitectCanvas({
           canEdit={canEdit}
         />
       </div>
+
+      {/* ── Layer 7: Canvas search overlay (toggled by "/" key or via search button) ── */}
+      <CanvasSearch
+        nodes={nodes}
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        onPick={handlePickSearchResult}
+      />
+
+      {/* ── Layer 8: Color legend (bottom-left) ── */}
+      {nodes.length > 0 && <CanvasLegend />}
+
+      {/* ── Layer 9: Groups panel — only useful when drilled into a module ── */}
+      {viewMode === 'expanded' && availableGroups.length > 0 && (
+        <GroupsPanel
+          groups={availableGroups}
+          collapsedGroups={collapsedGroups}
+          onToggleGroup={toggleGroup}
+          onCollapseAll={collapseAll}
+          onExpandAll={expandAll}
+        />
+      )}
+
+      {/* ── Layer 10: Back-to-modules pill (only when expanded) ── */}
+      {viewMode === 'expanded' && (
+        <button
+          onClick={closeModule}
+          style={{
+            position: 'absolute',
+            top: 72,
+            left: sidebarW + (sidebarCollapsed ? 12 : 16),
+            zIndex: 26,
+            display: 'flex', alignItems: 'center', gap: 8,
+            height: 34, padding: '0 14px 0 10px',
+            background: 'var(--bg-glass-strong)',
+            backdropFilter: 'blur(28px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(28px) saturate(180%)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 100,
+            color: 'var(--text-primary)',
+            fontSize: 12, fontWeight: 600,
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            boxShadow: 'var(--shadow-float)',
+            transition: 'all var(--t-fast), left 0.28s cubic-bezier(0.4,0,0.2,1)',
+            animation: 'fadeInDown 280ms cubic-bezier(0.34,1.56,0.64,1) forwards',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'var(--bg-elevated)';
+            e.currentTarget.style.borderColor = 'var(--accent-blue)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'var(--bg-glass-strong)';
+            e.currentTarget.style.borderColor = 'var(--border-default)';
+          }}
+        >
+          <ArrowLeft size={13} strokeWidth={2.2} />
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Layers size={12} color="var(--accent-blue)" strokeWidth={2} />
+            Modules
+          </span>
+          <span style={{
+            marginLeft: 4,
+            fontSize: 10, fontWeight: 500, color: 'var(--text-muted)',
+            fontFamily: "'JetBrains Mono', monospace",
+            paddingLeft: 8,
+            borderLeft: '1px solid var(--border-default)',
+          }}>
+            {(expandedModuleId || '').split('/').slice(-1)[0] || expandedModuleId}
+          </span>
+        </button>
+      )}
+
+      {/* ── Layer 11: Transition fade overlay (during module open/close) ── */}
+      {isTransitioning && (
+        <div
+          style={{
+            position: 'absolute', inset: 0,
+            background: 'radial-gradient(circle at center, rgba(79,142,247,0.10) 0%, rgba(7,6,28,0.30) 70%)',
+            pointerEvents: 'none',
+            zIndex: 19,
+            animation: 'fadeIn 200ms ease forwards',
+          }}
+        />
+      )}
 
       {/* ── Modals ── */}
       <AIChatbot

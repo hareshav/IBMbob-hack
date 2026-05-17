@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft, Play, RefreshCw,
-  Bot, Sparkles, GitMerge,
+  Bot, Sparkles,
   Sun, Moon, PanelLeftClose, PanelLeftOpen, Cpu,
+  Plus, ChevronDown, MousePointerClick,
 } from 'lucide-react';
 
 export default function WorkspaceNavbar({
@@ -11,12 +13,15 @@ export default function WorkspaceNavbar({
   onLoadGraph, onLoadAIGraph, isLoading, loadedFilePath,
   availableModels, selectedModelId, onSelectedModelIdChange,
   isLoadingModels,
-  onOpenChatbot, onOpenGenerateEndpoint, onOpenRefactorFunction,
-  hasSelectedNode, canEdit,
+  onOpenChatbot, onOpenGenerateEndpoint,
+  canEdit,
   sidebarCollapsed, onToggleSidebar,
   onFitView, onZoomIn, onZoomOut,
+  onAddManually,
 }) {
   const [inputFocused, setInputFocused] = useState(false);
+  const hasPath = Boolean((mainFilePath || '').trim());
+  const parseDisabled = isLoading || !hasPath;
 
   return (
     <nav style={{
@@ -98,19 +103,23 @@ export default function WorkspaceNavbar({
             type="text"
             value={mainFilePath}
             onChange={(e) => onMainFilePathChange(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && onLoadGraph()}
+            onKeyDown={(e) => e.key === 'Enter' && !parseDisabled && onLoadGraph()}
             onFocus={() => setInputFocused(true)}
             onBlur={() => setInputFocused(false)}
             placeholder={mode === 'github' ? 'https://github.com/owner/repository' : '/path/to/project/main.py'}
             style={{
               flex: 1, height: '100%',
               background: 'transparent',
-              color: 'var(--text-primary)',
+              /* Explicit fallback so the text is always readable even if the
+                 theme CSS variable fails to resolve. */
+              color: 'var(--text-primary, #12101E)',
+              WebkitTextFillColor: 'var(--text-primary, #12101E)',
               border: 'none', outline: 'none',
               padding: '0 12px',
               fontSize: 12.5,
               fontFamily: "'JetBrains Mono', monospace",
               minWidth: 0,
+              caretColor: 'var(--accent-blue, #4F8EF7)',
             }}
           />
         </div>
@@ -118,32 +127,33 @@ export default function WorkspaceNavbar({
         {/* Load Graph button (AST parser) */}
         <button
           onClick={onLoadGraph}
-          disabled={isLoading}
+          disabled={parseDisabled}
+          title={!hasPath ? 'Type a local file path or GitHub URL first' : 'Parse the workspace (AST)'}
           style={{
             height: 34, padding: '0 16px',
             borderRadius: 8,
-            background: isLoading ? 'var(--bg-elevated)' : 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 100%)',
-            color: '#fff', border: 'none',
+            background: parseDisabled ? 'var(--bg-elevated)' : 'linear-gradient(135deg, #4F8EF7 0%, #7C7FF5 100%)',
+            color: parseDisabled ? 'var(--text-muted)' : '#fff', border: 'none',
             fontSize: 12.5, fontWeight: 700,
-            cursor: isLoading ? 'not-allowed' : 'pointer',
+            cursor: parseDisabled ? 'not-allowed' : 'pointer',
             flexShrink: 0,
             display: 'flex', alignItems: 'center', gap: 6,
             transition: 'all 150ms ease',
-            opacity: isLoading ? 0.6 : 1,
+            opacity: parseDisabled ? 0.5 : 1,
             whiteSpace: 'nowrap',
             letterSpacing: '0.01em',
             fontFamily: 'inherit',
-            boxShadow: isLoading ? 'none' : '0 2px 14px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.12)',
+            boxShadow: parseDisabled ? 'none' : '0 2px 14px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.12)',
           }}
           onMouseEnter={(e) => {
-            if (!isLoading) {
+            if (!parseDisabled) {
               e.currentTarget.style.transform = 'translateY(-1px)';
               e.currentTarget.style.boxShadow = '0 5px 22px rgba(79,142,247,0.5), inset 0 1px 0 rgba(255,255,255,0.14)';
             }
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = 'none';
-            e.currentTarget.style.boxShadow = isLoading ? 'none' : '0 2px 14px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.12)';
+            e.currentTarget.style.boxShadow = parseDisabled ? 'none' : '0 2px 14px rgba(79,142,247,0.4), inset 0 1px 0 rgba(255,255,255,0.12)';
           }}
         >
           {isLoading
@@ -155,36 +165,38 @@ export default function WorkspaceNavbar({
         {/* Ask Bob AI button */}
         <button
           onClick={onLoadAIGraph}
-          disabled={isLoading}
-          title="Let IBM Bob AI analyse the codebase and build the graph semantically"
+          disabled={parseDisabled}
+          title={!hasPath
+            ? 'Type a local file path or GitHub URL first'
+            : 'Let IBM Bob AI analyse the codebase and build the graph semantically'}
           style={{
             height: 34, padding: '0 16px',
             borderRadius: 8,
-            background: isLoading
+            background: parseDisabled
               ? 'var(--bg-elevated)'
               : 'linear-gradient(135deg, #1AE0A0 0%, #2ED8F0 100%)',
-            color: isLoading ? 'var(--text-muted)' : '#0a0a12',
+            color: parseDisabled ? 'var(--text-muted)' : '#0a0a12',
             border: 'none',
             fontSize: 12.5, fontWeight: 700,
-            cursor: isLoading ? 'not-allowed' : 'pointer',
+            cursor: parseDisabled ? 'not-allowed' : 'pointer',
             flexShrink: 0,
             display: 'flex', alignItems: 'center', gap: 6,
             transition: 'all 150ms ease',
-            opacity: isLoading ? 0.5 : 1,
+            opacity: parseDisabled ? 0.45 : 1,
             whiteSpace: 'nowrap',
             letterSpacing: '0.01em',
             fontFamily: "'JetBrains Mono', monospace",
-            boxShadow: isLoading ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+            boxShadow: parseDisabled ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
           }}
           onMouseEnter={(e) => {
-            if (!isLoading) {
+            if (!parseDisabled) {
               e.currentTarget.style.transform = 'translateY(-1px)';
               e.currentTarget.style.boxShadow = '0 5px 22px rgba(26,224,160,0.55), inset 0 1px 0 rgba(255,255,255,0.22)';
             }
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = 'none';
-            e.currentTarget.style.boxShadow = isLoading ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            e.currentTarget.style.boxShadow = parseDisabled ? 'none' : '0 2px 14px rgba(26,224,160,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
           }}
         >
           {isLoading
@@ -239,18 +251,18 @@ export default function WorkspaceNavbar({
 
         <VSep />
 
-        {/* AI tool buttons — always colored */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-          <ColorBtn icon={<Bot size={13} />}     label="Chat"     color="#4F8EF7" onClick={onOpenChatbot} />
-          <ColorBtn icon={<Sparkles size={13} />} label="Generate" color="#2ED8F0" onClick={onOpenGenerateEndpoint} />
-          <ColorBtn
-            icon={<GitMerge size={13} />}
-            label="Refactor"
-            color="#B06EF7"
-            onClick={onOpenRefactorFunction}
-            disabled={!hasSelectedNode || !canEdit}
-          />
-        </div>
+        {/* Add Endpoint dropdown — primary "create" entry point. Delete lives in
+            the side panel + on the selected node's own context (it's contextual). */}
+        <AddEndpointMenu
+          onAddManually={onAddManually}
+          onGenerate={onOpenGenerateEndpoint}
+        />
+
+        <VSep />
+
+        {/* Chat is the only persistent AI action here. Refactor is contextual —
+            it lives on the selected function's panel where it actually applies. */}
+        <ColorBtn icon={<Bot size={13} />} label="Chat" color="#4F8EF7" onClick={onOpenChatbot} />
 
         <VSep />
 
@@ -304,11 +316,12 @@ function NBtn({ children, onClick, tooltip }) {
 }
 
 /* ── Colored AI/action button — always-on color ── */
-function ColorBtn({ icon, label, color, onClick, disabled = false }) {
+function ColorBtn({ icon, label, color, onClick, disabled = false, tooltip }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      data-tooltip={tooltip}
       style={{
         height: 30, padding: '0 10px',
         borderRadius: 7,
@@ -341,6 +354,200 @@ function ColorBtn({ icon, label, color, onClick, disabled = false }) {
     >
       {icon}
       <span>{label}</span>
+    </button>
+  );
+}
+
+/* ── Add Endpoint dropdown — menu rendered via portal so it escapes the navbar's
+       overflow:hidden + any parent stacking contexts. ── */
+function AddEndpointMenu({ onAddManually, onGenerate }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+  const color = '#2ED8F0';
+
+  /* Recompute menu position from the button's bounding rect every time it opens
+     (and on scroll/resize while open). Uses position:fixed so we work in viewport
+     coords and don't get clipped by any ancestor with overflow:hidden. */
+  const recomputePos = () => {
+    const b = btnRef.current;
+    if (!b) return;
+    const r = b.getBoundingClientRect();
+    setPos({
+      top: r.bottom + 6,
+      right: Math.max(8, window.innerWidth - r.right),
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    recomputePos();
+    const onScrollOrResize = () => recomputePos();
+    window.addEventListener('resize', onScrollOrResize);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    return () => {
+      window.removeEventListener('resize', onScrollOrResize);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+    };
+  }, [open]);
+
+  /* Outside-click and Escape close the menu. The "outside" check must include
+     the trigger button so clicking it again toggles instead of immediately
+     re-opening from the document handler. */
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (btnRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={() => setOpen((v) => !v)}
+        data-tooltip="Add an endpoint to the graph"
+        style={{
+          height: 30, padding: '0 9px 0 10px',
+          borderRadius: 7,
+          background: open ? `${color}24` : `${color}14`,
+          border: `1px solid ${open ? `${color}55` : `${color}38`}`,
+          color,
+          fontSize: 11.5, fontWeight: 600,
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 5,
+          transition: 'all 120ms ease',
+          whiteSpace: 'nowrap',
+          fontFamily: 'inherit',
+          letterSpacing: '0.01em',
+          boxShadow: open ? `0 0 14px ${color}33` : 'none',
+        }}
+        onMouseEnter={(e) => {
+          if (open) return;
+          e.currentTarget.style.background = `${color}24`;
+          e.currentTarget.style.borderColor = `${color}55`;
+          e.currentTarget.style.boxShadow = `0 0 14px ${color}22`;
+        }}
+        onMouseLeave={(e) => {
+          if (open) return;
+          e.currentTarget.style.background = `${color}14`;
+          e.currentTarget.style.borderColor = `${color}38`;
+          e.currentTarget.style.boxShadow = 'none';
+        }}
+      >
+        <Plus size={13} strokeWidth={2.2} />
+        <span>Add Endpoint</span>
+        <ChevronDown
+          size={11}
+          strokeWidth={2.2}
+          style={{
+            transition: 'transform 160ms ease',
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+          }}
+        />
+      </button>
+
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            right: pos.right,
+            zIndex: 9999,
+            minWidth: 260,
+            background: 'var(--bg-glass-strong)',
+            backdropFilter: 'blur(32px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(32px) saturate(180%)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 10,
+            padding: 4,
+            boxShadow: 'var(--shadow-float)',
+            animation: 'fadeInDown 180ms cubic-bezier(0.34,1.56,0.64,1) forwards',
+          }}
+        >
+          <MenuItem
+            icon={<MousePointerClick size={14} />}
+            color="#4F8EF7"
+            label="Add Manually"
+            hint="Open the side panel and place nodes by hand"
+            onClick={() => { setOpen(false); onAddManually?.(); }}
+          />
+          <MenuItem
+            icon={<Sparkles size={14} />}
+            color="#2ED8F0"
+            label="Generate Endpoint"
+            hint="Let IBM Bob AI write a new route into your workspace"
+            onClick={() => { setOpen(false); onGenerate?.(); }}
+          />
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function MenuItem({ icon, color, label, hint, onClick }) {
+  return (
+    <button
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        width: '100%',
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '8px 10px',
+        background: 'transparent',
+        border: '1px solid transparent',
+        borderRadius: 7,
+        cursor: 'pointer',
+        textAlign: 'left',
+        fontFamily: 'inherit',
+        transition: 'all var(--t-fast)',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = `${color}14`;
+        e.currentTarget.style.borderColor = `${color}33`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.borderColor = 'transparent';
+      }}
+    >
+      <div style={{
+        width: 28, height: 28, borderRadius: 7,
+        background: `${color}18`,
+        border: `1px solid ${color}38`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color, flexShrink: 0,
+      }}>
+        {icon}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 12, fontWeight: 600,
+          color: 'var(--text-primary)',
+          lineHeight: 1.3,
+        }}>
+          {label}
+        </div>
+        <div style={{
+          fontSize: 10.5, color: 'var(--text-muted)',
+          lineHeight: 1.4, marginTop: 1,
+        }}>
+          {hint}
+        </div>
+      </div>
     </button>
   );
 }
